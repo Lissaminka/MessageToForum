@@ -1,0 +1,190 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Diagnostic reports (Node.js)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage / Test reports
+coverage
+*.lcov
+.nyc_output
+
+# Build / Temp directories
+build/
+dist/
+lib-cov
+.cache
+.parcel-cache
+.next
+.nuxt
+.vuepress/dist
+.svelte-kit/
+**/.vitepress/dist
+**/.vitepress/cache
+.docusaurus
+.serverless/
+.fusebox/
+.dynamodb/
+.firebase/
+
+# Dependency directories
+node_modules/
+bower_components/
+jspm_packages/
+web_modules/
+
+# Optional caches
+.npm
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.vscode/
+.vscode-test
+*.code-workspace
+
+# TypeScript
+*.tsbuildinfo
+
+# ESLint / Stylelint
+.eslintcache
+.stylelintcache
+
+# REPL / History
+.node_repl_history
+
+# Parcel / Vite / Next / Nuxt / Gatsby / VuePress / Docusaurus
+.cache/
+.parcel-cache/
+.next/
+.nuxt/
+out/
+.vuepress/dist/
+.temp/
+.svelte-kit/
+.vitepress/dist/
+.vitepress/cache/
+.docusaurus/
+
+# Puppeteer / debug screenshots
+debug/
+*.png
+
+# Other generated files
+*.tgz
+.lock-wscript
+.tern-port# ==========================
+# Node.js / npm / Yarn
+# ==========================
+node_modules/
+jspm_packages/
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+package-lock.json
+yarn.lock
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Diagnostic reports
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Build / coverage / instrumented libs
+lib-cov
+coverage
+*.lcov
+.nyc_output
+.grunt
+build/Release
+.next
+out
+.nuxt
+dist
+.cache
+.parcel-cache
+.vuepress/dist
+.temp
+.svelte-kit/
+**/.vitepress/dist
+**/.vitepress/cache
+.docusaurus
+.serverless/
+.fusebox/
+.dynamodb/
+.firebase/
+
+# TypeScript
+*.tsbuildinfo
+
+# ESLint / Stylelint
+.eslintcache
+.stylelintcache
+
+# REPL / Pack
+.node_repl_history
+*.tgz
+.yarn-integrity
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# VSCode testing
+.vscode-test
+
+# Parcel / Snowpack / Vite
+web_modules/
+.cache
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# ==========================
+# Puppeteer / local debug
+# ==========================
+*.png               # Screenshots
+*.jpg
+*.jpeg
+*.gif
+
+# ==========================
+# Optional extras
+# ==========================
+.DS_Store
+Thumbs.db
