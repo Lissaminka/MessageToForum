@@ -1,61 +1,63 @@
 # MessageToForum
 
-**MessageToForum** ist ein Node.js-Bot, der lange Discord-Nachrichten automatisch in ein Forum postet. Ideal, um den in Discord entstehenden Content auch in Foren sichtbar zu machen.
+**MessageToForum** is a Node.js bot that automatically posts long Discord messages to a forum, keeping your community content synchronized between Discord and the forum.
 
-## Funktionen
+## Features
 
-- Längere Nachrichten (>= 1500 Zeichen) werden automatisch ins Forum übertragen.
-- Reply-Funktion: Nachrichtenbezug wird übernommen, um Kontext zu wahren.
-- Optionale Debug-Anzeige (`DEBUG=true` in der `.env`).
-- Forum-Login sicher über `.env`-Variablen.
+* Automatically transfers longer messages (configurable minimum length) to the forum.
+* Reply functionality: preserves message references to maintain context.
+* Optional debug mode (`DEBUG=true` in `.env`).
+* Secure forum login via environment variables.
 
 ## Installation
 
-1. Repository klonen:
+1. Clone the repository:
+
 ```bash
 git clone git@github.com:Lissaminka/MessageToForum.git
 cd MessageToForum
-````
+```
 
-2. Abhängigkeiten installieren:
+2. Install dependencies:
 
 ```bash
 npm install
 ```
 
-3. `.env` anlegen (siehe `.env.example`) und Token/Passwörter eintragen.
+3. Create a `.env` file (see `.env.example`) and fill in your Discord token and forum credentials.
 
-4. Bot starten:
+4. Start the bot:
 
 ```bash
 node index.js
 ```
 
-5. Optional: Express-Server starten:
+5. (Optional) Start the Express server:
 
 ```bash
 node server.js
 ```
 
-## Konfiguration
+## Configuration
 
-Die wichtigsten Einstellungen liegen in der `.env`:
+The main settings are stored in the `.env` file. You can adjust the minimum message length (`MIN_MESSAGE_LENGTH`) here if desired:
 
 ```env
 # Discord
-DISCORD_TOKEN=dein_discord_token
+DISCORD_TOKEN=your_discord_token
 
 # Forum
-FORUM_USERNAME=dein_forum_username
-FORUM_PASSWORD=dein_forum_passwort
+FORUM_USERNAME=your_forum_username
+FORUM_PASSWORD=your_forum_password
 
 # Optional
 DEBUG=false
 PORT=3000
+MIN_MESSAGE_LENGTH=1500
 ```
 
-## Lizenz
+**Note:** `MIN_MESSAGE_LENGTH` is the threshold (number of characters) a Discord message must reach before it gets posted to the forum. Adjust this value to suit your needs.
 
-Dieses Projekt ist quelloffen unter der MIT-Lizenz.
+## License
 
-```
+This project is open source under the MIT License.
