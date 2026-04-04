@@ -26,7 +26,7 @@ const MIN_MESSAGE_LENGTH = parseInt(process.env.MIN_MESSAGE_LENGTH || '1500', 10
 let browser;
 let page;
 
-// Login
+// Login-Funktion
 async function loginToForum() {
   browser = await puppeteer.launch({
     headless: !DEBUG,
@@ -35,9 +35,7 @@ async function loginToForum() {
 
   page = await browser.newPage();
 
-  await page.goto('https://forum.theunity.de/', {
-    waitUntil: 'networkidle2'
-  });
+  await page.goto('https://forum.theunity.de/', { waitUntil: 'networkidle2' });
 
   const loginLink = await page.$('a.loginLink');
 
@@ -53,9 +51,7 @@ async function loginToForum() {
   await page.type('input#username', FORUM_USERNAME);
   await page.type('input[name="password"]', FORUM_PASSWORD);
 
-  const submitButton = await page.waitForSelector('input[type="submit"]', {
-    visible: true
-  });
+  const submitButton = await page.waitForSelector('input[type="submit"]', { visible: true });
 
   await Promise.all([
     submitButton.click(),
@@ -67,8 +63,6 @@ async function loginToForum() {
 
 // Post ins Forum
 async function postToForum(message, author, channel) {
-  const marker = `BOTMARKER${Date.now()}END`;
-
   const now = new Date();
   const timestamp = now.toLocaleString('de-DE', {
     day: '2-digit',
@@ -85,40 +79,35 @@ ${message}
 `;
 
   try {
-    await page.goto('https://forum.theunity.de/index.php?thread/794/', {
-      waitUntil: 'networkidle2'
+    // Thread aufrufen
+    await page.goto('https://forum.theunity.de/index.php?thread/794/', { waitUntil: 'networkidle2' });
+
+    // Letzte Seite automatisch ermitteln
+    const lastPageUrl = await page.evaluate(() => {
+      const pageLinks = [...document.querySelectorAll('a[title^="Seite "]')];
+      if (pageLinks.length === 0) return null;
+      const lastPageLink = pageLinks[pageLinks.length - 1];
+      return lastPageLink.href;
     });
 
-    const initialPostCount = await page.$$eval(
-      '.message, article',
-      els => els.length
-    );
+    if (lastPageUrl) {
+      await page.goto(lastPageUrl, { waitUntil: 'networkidle2' });
+    }
 
-    const replyButton = await page.waitForSelector(
-      'button.buttonPrimary[data-type="save"]',
-      { visible: true }
-    );
+    const initialPostCount = await page.$$eval('.message, article', els => els.length);
 
+    const replyButton = await page.waitForSelector('button.buttonPrimary[data-type="save"]', { visible: true });
     await replyButton.click();
 
-    const editor = await page.waitForSelector(
-      'div.redactor-layer[contenteditable="true"]',
-      { visible: true, timeout: 30000 }
-    );
-
+    const editor = await page.waitForSelector('div.redactor-layer[contenteditable="true"]', { visible: true, timeout: 30000 });
     await editor.click();
 
-    // Inhalt setzen + unsichtbarer Marker
-    await page.evaluate((text, marker) => {
+    // Inhalt setzen
+    await page.evaluate((text) => {
       const editor = document.querySelector('div.redactor-layer[contenteditable="true"]');
       editor.innerHTML = '';
       editor.focus();
 
-      // Unsichtbarer Marker
-      const comment = document.createComment(marker);
-      editor.appendChild(comment);
-
-      // Zeilen verarbeiten (inkl. echter Leerzeilen)
       text.split('\n').forEach(line => {
         if (line.trim() === '') {
           const p1 = document.createElement('p');
@@ -138,45 +127,30 @@ ${message}
           editor.appendChild(p);
         }
       });
-    }, forumMessage, marker);
+    }, forumMessage);
 
-    const submitButton = await page.waitForSelector(
-      'button.buttonPrimary[data-type="save"]',
-      { visible: true }
-    );
-
+    const submitButton = await page.waitForSelector('button.buttonPrimary[data-type="save"]', { visible: true });
     await submitButton.click();
 
+    // Auf neuen Post warten
     await page.waitForFunction(
-      (initialCount) => {
-        const posts = document.querySelectorAll('.message, article');
-        return posts.length > initialCount;
-      },
-      { timeout: 10000 },
+      (initialCount) => document.querySelectorAll('.message, article').length > initialCount,
+      { timeout: 20000 },
       initialPostCount
     );
 
-    const found = await page.evaluate((marker) => {
-      return document.body.innerHTML.includes(marker);
-    }, marker);
-
-    if (found) {
-      console.log("INFO: Post erfolgreich übertragen");
-    } else {
-      console.log("WARN: Post erstellt, Marker nicht eindeutig gefunden");
-    }
+    console.log("INFO: Post erfolgreich übertragen");
 
   } catch (err) {
-    console.log("ERROR: Posting fehlgeschlagen:", err.message);
-
+    console.log("ERROR: Posting fehlgeschlagen (wird ignoriert, falls Post trotzdem erstellt):", err.message);
     if (DEBUG) {
       await page.screenshot({ path: 'error_debug.png', fullPage: true });
     }
   }
 }
 
-// Discord
-client.once('ready', async () => {
+// Discord Client
+client.once('clientReady', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await loginToForum();
 });
@@ -185,34 +159,26 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
   if (message.content.length >= MIN_MESSAGE_LENGTH) {
-
     let replyText = '';
 
     if (message.reference) {
       try {
         const referenced = await message.fetchReference();
-
         if (referenced.content.length < MIN_MESSAGE_LENGTH) {
           const shortened = referenced.content.slice(0, 300);
           const suffix = referenced.content.length > 300 ? '...' : '';
-
           replyText =
 `<strong>Antwort auf ${referenced.author.username}:</strong>
 "${shortened}${suffix}"
 
 `;
         }
-
       } catch (err) {
         console.log("WARN: Referenz konnte nicht geladen werden");
       }
     }
 
-    await postToForum(
-      replyText + message.content,
-      message.author.username,
-      message.channel.name
-    );
+    await postToForum(replyText + message.content, message.author.username, message.channel.name);
   }
 });
 

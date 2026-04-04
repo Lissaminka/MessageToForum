@@ -6,8 +6,23 @@
 
 * Automatically transfers longer messages (configurable minimum length) to the forum.
 * Reply functionality: preserves message references to maintain context.
-* Optional debug mode (`DEBUG=true` in `.env`).
+* Automatic navigation to the latest thread page.
+* Optional debug mode (`DEBUG=true` in `.env`) with full Puppeteer visibility.
 * Secure forum login via environment variables.
+* Marker warnings removed for clean logs.
+
+## Known Limitations
+
+* Currently, passwords with special characters can cause login issues.
+  It is recommended to use long passwords (>64 characters) consisting of uppercase and lowercase letters and numbers.
+
+## Planned Features
+
+1. **Slash command on Discord:** Direct control of the bot via Discord commands.
+2. **Mapping for editing messages:** Allows updates of edited Discord messages in the forum.
+3. **Thread mapping:** Support for multiple threads with automatic assignment.
+4. **Automatic bot confirmation message:** After creating a long message, the bot will ask whether the content should also be posted in the forum.
+5. **User-friendly `.env` interface:** Easier configuration of credentials and settings.
 
 ## Installation
 
@@ -61,3 +76,5 @@ MIN_MESSAGE_LENGTH=1500
 ## License
 
 This project is open source under the MIT License.
+
+---
