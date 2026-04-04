@@ -20,6 +20,9 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 // Debug-Flag aus .env
 const DEBUG = process.env.DEBUG === 'true';
 
+// Minimale Nachrichtenlänge aus .env, Standard 1500
+const MIN_MESSAGE_LENGTH = parseInt(process.env.MIN_MESSAGE_LENGTH || '1500', 10);
+
 let browser;
 let page;
 
@@ -118,7 +121,6 @@ ${message}
       // Zeilen verarbeiten (inkl. echter Leerzeilen)
       text.split('\n').forEach(line => {
         if (line.trim() === '') {
-          // doppelte Leerzeile erzwingen
           const p1 = document.createElement('p');
           p1.innerHTML = '<br>';
           editor.appendChild(p1);
@@ -128,14 +130,11 @@ ${message}
           editor.appendChild(p2);
         } else {
           const p = document.createElement('p');
-
-          // HTML bewusst erlauben (für <strong>)
           if (line.includes('<strong>')) {
             p.innerHTML = line;
           } else {
             p.textContent = line;
           }
-
           editor.appendChild(p);
         }
       });
@@ -177,7 +176,7 @@ ${message}
 }
 
 // Discord
-client.once('clientReady', async () => {
+client.once('ready', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await loginToForum();
 });
@@ -185,7 +184,7 @@ client.once('clientReady', async () => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  if (message.content.length >= 1500) {
+  if (message.content.length >= MIN_MESSAGE_LENGTH) {
 
     let replyText = '';
 
@@ -193,7 +192,7 @@ client.on('messageCreate', async (message) => {
       try {
         const referenced = await message.fetchReference();
 
-        if (referenced.content.length < 1500) {
+        if (referenced.content.length < MIN_MESSAGE_LENGTH) {
           const shortened = referenced.content.slice(0, 300);
           const suffix = referenced.content.length > 300 ? '...' : '';
 
