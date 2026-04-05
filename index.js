@@ -82,12 +82,26 @@ ${message}
     // Thread aufrufen
     await page.goto('https://forum.theunity.de/index.php?thread/794/', { waitUntil: 'networkidle2' });
 
-    // Letzte Seite automatisch ermitteln
+    // Letzte Seite automatisch ermitteln (robust)
     const lastPageUrl = await page.evaluate(() => {
-      const pageLinks = [...document.querySelectorAll('a[title^="Seite "]')];
-      if (pageLinks.length === 0) return null;
-      const lastPageLink = pageLinks[pageLinks.length - 1];
-      return lastPageLink.href;
+      const links = Array.from(document.querySelectorAll('a[href*="pageNo="]'));
+      if (links.length === 0) return null;
+
+      let max = 1;
+      let url = null;
+
+      for (const link of links) {
+        const match = link.href.match(/pageNo=(\d+)/);
+        if (match) {
+          const num = parseInt(match[1], 10);
+          if (num > max) {
+            max = num;
+            url = link.href;
+          }
+        }
+      }
+
+      return url;
     });
 
     if (lastPageUrl) {
@@ -96,40 +110,39 @@ ${message}
 
     const initialPostCount = await page.$$eval('.message, article', els => els.length);
 
-    const replyButton = await page.waitForSelector('button.buttonPrimary[data-type="save"]', { visible: true });
-    await replyButton.click();
+    // CKEditor finden
+    const editor = await page.waitForSelector(
+      'div.ck-editor__editable[contenteditable="true"]',
+      { visible: true, timeout: 30000 }
+    );
 
-    const editor = await page.waitForSelector('div.redactor-layer[contenteditable="true"]', { visible: true, timeout: 30000 });
     await editor.click();
 
-    // Inhalt setzen
-    await page.evaluate((text) => {
-      const editor = document.querySelector('div.redactor-layer[contenteditable="true"]');
-      editor.innerHTML = '';
-      editor.focus();
+    // Inhalt löschen
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyA');
+    await page.keyboard.up('Control');
+    await page.keyboard.press('Backspace');
 
-      text.split('\n').forEach(line => {
-        if (line.trim() === '') {
-          const p1 = document.createElement('p');
-          p1.innerHTML = '<br>';
-          editor.appendChild(p1);
+    // Schnelles Einfügen via Clipboard (mit Fallback)
+    try {
+      await page.evaluate((text) => {
+        navigator.clipboard.writeText(text);
+      }, forumMessage);
 
-          const p2 = document.createElement('p');
-          p2.innerHTML = '<br>';
-          editor.appendChild(p2);
-        } else {
-          const p = document.createElement('p');
-          if (line.includes('<strong>')) {
-            p.innerHTML = line;
-          } else {
-            p.textContent = line;
-          }
-          editor.appendChild(p);
-        }
-      });
-    }, forumMessage);
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyV');
+      await page.keyboard.up('Control');
+    } catch {
+      // Fallback: schnelles Tippen
+      await page.keyboard.type(forumMessage, { delay: 0 });
+    }
 
-    const submitButton = await page.waitForSelector('button.buttonPrimary[data-type="save"]', { visible: true });
+    const submitButton = await page.waitForSelector(
+      'button.buttonPrimary[data-type="save"]',
+      { visible: true }
+    );
+
     await submitButton.click();
 
     // Auf neuen Post warten
