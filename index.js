@@ -26,6 +26,29 @@ const MIN_MESSAGE_LENGTH = parseInt(process.env.MIN_MESSAGE_LENGTH || '1500', 10
 let browser;
 let page;
 
+// Hilfsfunktion: HTML → BBCode konvertieren
+function convertHtmlToBBCode(html) {
+  let bb = html;
+
+  // Fett, kursiv, unterstrichen
+  bb = bb.replace(/<strong>(.*?)<\/strong>/gi, '[b]$1[/b]');
+  bb = bb.replace(/<b>(.*?)<\/b>/gi, '[b]$1[/b]');
+  bb = bb.replace(/<em>(.*?)<\/em>/gi, '[i]$1[/i]');
+  bb = bb.replace(/<i>(.*?)<\/i>/gi, '[i]$1[/i]');
+  bb = bb.replace(/<u>(.*?)<\/u>/gi, '[u]$1[/u]');
+
+  // Absätze zu Zeilenumbrüchen
+  bb = bb.replace(/<p>(.*?)<\/p>/gi, '$1\n');
+
+  // Eventuelle <br>
+  bb = bb.replace(/<br\s*\/?>/gi, '\n');
+
+  // Entferne übrige HTML-Tags
+  bb = bb.replace(/<\/?[^>]+(>|$)/g, '');
+
+  return bb.trim();
+}
+
 // Login-Funktion
 async function loginToForum() {
   browser = await puppeteer.launch({
@@ -72,17 +95,18 @@ async function postToForum(message, author, channel) {
     minute: '2-digit'
   });
 
-  const forumMessage = `
+  // BBCode Header + HTML → BBCode Konvertierung
+  const forumMessage = convertHtmlToBBCode(`
 <strong>${author} schrieb am ${timestamp} in #${channel}:</strong>
 
 ${message}
-`;
+`);
 
   try {
     // Thread aufrufen
     await page.goto('https://forum.theunity.de/index.php?thread/794/', { waitUntil: 'networkidle2' });
 
-    // Letzte Seite automatisch ermitteln (robust)
+    // Letzte Seite automatisch ermitteln
     const lastPageUrl = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('a[href*="pageNo="]'));
       if (links.length === 0) return null;
@@ -134,7 +158,6 @@ ${message}
       await page.keyboard.press('KeyV');
       await page.keyboard.up('Control');
     } catch {
-      // Fallback: schnelles Tippen
       await page.keyboard.type(forumMessage, { delay: 0 });
     }
 
@@ -181,8 +204,8 @@ client.on('messageCreate', async (message) => {
           const shortened = referenced.content.slice(0, 300);
           const suffix = referenced.content.length > 300 ? '...' : '';
           replyText =
-`<strong>Antwort auf ${referenced.author.username}:</strong>
-"${shortened}${suffix}"
+`[b]Antwort auf ${referenced.author.username}:[/b]
+"${convertHtmlToBBCode(shortened)}${suffix}"
 
 `;
         }
