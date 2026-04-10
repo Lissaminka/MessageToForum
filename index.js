@@ -2,7 +2,7 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import puppeteer from 'puppeteer';
 import dotenv from 'dotenv';
 
-dotenv.config(); // .env laden
+dotenv.config();
 
 const client = new Client({
   intents: [
@@ -12,48 +12,39 @@ const client = new Client({
   ]
 });
 
-// Zugangsdaten aus .env
 const FORUM_USERNAME = process.env.FORUM_USERNAME;
 const FORUM_PASSWORD = process.env.FORUM_PASSWORD;
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
-// Debug-Flag aus .env
 const DEBUG = process.env.DEBUG === 'true';
-
-// Minimale Nachrichtenlänge aus .env, Standard 1500
 const MIN_MESSAGE_LENGTH = parseInt(process.env.MIN_MESSAGE_LENGTH || '1500', 10);
 
 let browser;
 let page;
 
-// Hilfsfunktion: HTML → BBCode konvertieren
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 function convertHtmlToBBCode(html) {
   let bb = html;
 
-  // Fett, kursiv, unterstrichen
   bb = bb.replace(/<strong>(.*?)<\/strong>/gi, '[b]$1[/b]');
   bb = bb.replace(/<b>(.*?)<\/b>/gi, '[b]$1[/b]');
   bb = bb.replace(/<em>(.*?)<\/em>/gi, '[i]$1[/i]');
   bb = bb.replace(/<i>(.*?)<\/i>/gi, '[i]$1[/i]');
   bb = bb.replace(/<u>(.*?)<\/u>/gi, '[u]$1[/u]');
-
-  // Absätze zu Zeilenumbrüchen
   bb = bb.replace(/<p>(.*?)<\/p>/gi, '$1\n');
-
-  // Eventuelle <br>
   bb = bb.replace(/<br\s*\/?>/gi, '\n');
-
-  // Entferne übrige HTML-Tags
   bb = bb.replace(/<\/?[^>]+(>|$)/g, '');
 
   return bb.trim();
 }
 
-// Login-Funktion
 async function loginToForum() {
   browser = await puppeteer.launch({
     headless: !DEBUG,
-    slowMo: DEBUG ? 50 : 0
+    slowMo: DEBUG ? 30 : 0
   });
 
   page = await browser.newPage();
@@ -63,7 +54,7 @@ async function loginToForum() {
   const loginLink = await page.$('a.loginLink');
 
   if (!loginLink) {
-    console.log("Forum session initialized.");
+    console.log("Session vorhanden");
     return;
   }
 
@@ -84,7 +75,30 @@ async function loginToForum() {
   console.log("Login abgeschlossen");
 }
 
-// Post ins Forum
+async function fastInsert(text) {
+  try {
+    await page.evaluate((text) => {
+      const editor = document.querySelector('[contenteditable="true"]');
+      editor.focus();
+
+      const data = new DataTransfer();
+      data.setData('text/plain', text);
+
+      const pasteEvent = new ClipboardEvent('paste', {
+        clipboardData: data,
+        bubbles: true
+      });
+
+      editor.dispatchEvent(pasteEvent);
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    }, text);
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function postToForum(message, author, channel) {
   const now = new Date();
   const timestamp = now.toLocaleString('de-DE', {
@@ -95,7 +109,6 @@ async function postToForum(message, author, channel) {
     minute: '2-digit'
   });
 
-  // BBCode Header + HTML → BBCode Konvertierung
   const forumMessage = convertHtmlToBBCode(`
 <strong>${author} schrieb am ${timestamp} in #${channel}:</strong>
 
@@ -103,13 +116,13 @@ ${message}
 `);
 
   try {
-    // Thread aufrufen
-    await page.goto('https://forum.theunity.de/index.php?thread/794/', { waitUntil: 'networkidle2' });
+    await page.goto('https://forum.theunity.de/index.php?thread/794/', {
+      waitUntil: 'networkidle2'
+    });
 
-    // Letzte Seite automatisch ermitteln
     const lastPageUrl = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('a[href*="pageNo="]'));
-      if (links.length === 0) return null;
+      if (!links.length) return null;
 
       let max = 1;
       let url = null;
@@ -117,9 +130,9 @@ ${message}
       for (const link of links) {
         const match = link.href.match(/pageNo=(\d+)/);
         if (match) {
-          const num = parseInt(match[1], 10);
-          if (num > max) {
-            max = num;
+          const n = parseInt(match[1], 10);
+          if (n > max) {
+            max = n;
             url = link.href;
           }
         }
@@ -132,34 +145,25 @@ ${message}
       await page.goto(lastPageUrl, { waitUntil: 'networkidle2' });
     }
 
-    const initialPostCount = await page.$$eval('.message, article', els => els.length);
+    const initialCount = await page.$$eval('.message, article', els => els.length);
 
-    // CKEditor finden
-    const editor = await page.waitForSelector(
-      'div.ck-editor__editable[contenteditable="true"]',
-      { visible: true, timeout: 30000 }
-    );
+    const editor = await page.waitForSelector('[contenteditable="true"]', { visible: true });
 
     await editor.click();
+    await sleep(100);
 
-    // Inhalt löschen
     await page.keyboard.down('Control');
     await page.keyboard.press('KeyA');
     await page.keyboard.up('Control');
     await page.keyboard.press('Backspace');
 
-    // Schnelles Einfügen via Clipboard (mit Fallback)
-    try {
-      await page.evaluate((text) => {
-        navigator.clipboard.writeText(text);
-      }, forumMessage);
+    const success = await fastInsert(forumMessage);
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyV');
-      await page.keyboard.up('Control');
-    } catch {
-      await page.keyboard.type(forumMessage, { delay: 0 });
+    if (!success) {
+      await page.keyboard.type(forumMessage, { delay: 1 });
     }
+
+    await sleep(200);
 
     const submitButton = await page.waitForSelector(
       'button.buttonPrimary[data-type="save"]',
@@ -168,24 +172,20 @@ ${message}
 
     await submitButton.click();
 
-    // Auf neuen Post warten
     await page.waitForFunction(
-      (initialCount) => document.querySelectorAll('.message, article').length > initialCount,
+      (initialCount) =>
+        document.querySelectorAll('.message, article').length > initialCount,
       { timeout: 20000 },
-      initialPostCount
+      initialCount
     );
 
-    console.log("INFO: Post erfolgreich übertragen");
+    console.log("Post erfolgreich übertragen");
 
   } catch (err) {
-    console.log("ERROR: Posting fehlgeschlagen (wird ignoriert, falls Post trotzdem erstellt):", err.message);
-    if (DEBUG) {
-      await page.screenshot({ path: 'error_debug.png', fullPage: true });
-    }
+    console.log("Fehler:", err.message);
   }
 }
 
-// Discord Client
 client.once('clientReady', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await loginToForum();
@@ -199,22 +199,28 @@ client.on('messageCreate', async (message) => {
 
     if (message.reference) {
       try {
-        const referenced = await message.fetchReference();
-        if (referenced.content.length < MIN_MESSAGE_LENGTH) {
-          const shortened = referenced.content.slice(0, 300);
-          const suffix = referenced.content.length > 300 ? '...' : '';
+        const ref = await message.fetchReference();
+
+        if (ref.content.length < MIN_MESSAGE_LENGTH) {
+          const short = ref.content.slice(0, 300);
+          const suffix = ref.content.length > 300 ? '...' : '';
+
           replyText =
-`[b]Antwort auf ${referenced.author.username}:[/b]
-"${convertHtmlToBBCode(shortened)}${suffix}"
+`[b]Antwort auf ${ref.author.username}:[/b]
+"${convertHtmlToBBCode(short)}${suffix}"
 
 `;
         }
-      } catch (err) {
-        console.log("WARN: Referenz konnte nicht geladen werden");
+      } catch {
+        console.log("Referenz konnte nicht geladen werden");
       }
     }
 
-    await postToForum(replyText + message.content, message.author.username, message.channel.name);
+    await postToForum(
+      replyText + message.content,
+      message.author.username,
+      message.channel.name
+    );
   }
 });
 
