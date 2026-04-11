@@ -1,6 +1,7 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import puppeteer from 'puppeteer';
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -21,6 +22,26 @@ const FORUM_PASSWORD = process.env.FORUM_PASSWORD;
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 const DEBUG = process.env.DEBUG === 'true';
+
+// ---------------- Cache ----------------
+
+const CACHE_FILE = './cache/threads.json';
+
+function loadCache() {
+  try {
+    return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function saveCache(data) {
+  try {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.log("Cache write error:", e.message);
+  }
+}
 
 // ---------------- Thread Boards ----------------
 
@@ -44,7 +65,8 @@ const BOARDS = [
 let browser;
 let page;
 
-let THREAD_CACHE = [];
+// 👉 CHANGE: jetzt aus Cache initialisieren
+let THREAD_CACHE = loadCache();
 let LAST_UPDATE = 0;
 
 // ---------------- Utils ----------------
@@ -264,6 +286,8 @@ async function refreshThreads() {
   THREAD_CACHE = Array.from(all.values());
   LAST_UPDATE = Date.now();
 
+  saveCache(THREAD_CACHE);
+
   console.log(`Threads geladen: ${THREAD_CACHE.length}`);
 }
 
@@ -279,8 +303,14 @@ async function refreshThreadsIfNeeded() {
 
 client.once('clientReady', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
+
   await loginToForum();
-  await refreshThreads();
+
+  // Cache ist sofort verfügbar
+  console.log("Cache geladen:", THREAD_CACHE.length);
+
+  // Hintergrund Refresh
+  refreshThreads();
 });
 
 // Autocomplete
@@ -313,7 +343,6 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await postToForum(message, interaction.user.username, threadId);
 
-    // öffentliche Bestätigung
     await interaction.channel.send(
       `✅ Post erfolgreich ins Forum gesendet (Thread ${threadId})`
     );
