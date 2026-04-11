@@ -5,8 +5,6 @@ import fs from 'fs';
 
 dotenv.config();
 
-// ---------------- Discord ----------------
-
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -15,35 +13,11 @@ const client = new Client({
   ]
 });
 
-// ---------------- Config ----------------
-
 const FORUM_USERNAME = process.env.FORUM_USERNAME;
 const FORUM_PASSWORD = process.env.FORUM_PASSWORD;
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 const DEBUG = process.env.DEBUG === 'true';
-
-// ---------------- Cache ----------------
-
-const CACHE_FILE = './cache/threads.json';
-
-function loadCache() {
-  try {
-    return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-function saveCache(data) {
-  try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2));
-  } catch (e) {
-    console.log("Cache write error:", e.message);
-  }
-}
-
-// ---------------- Thread Boards ----------------
 
 const BOARDS = [
   "https://forum.theunity.de/board/4-news-questions/",
@@ -60,16 +34,13 @@ const BOARDS = [
   "https://forum.theunity.de/board/26-müllhalde/"
 ];
 
-// ---------------- State ----------------
-
 let browser;
 let page;
+let crawlPage;
 
-// 👉 CHANGE: jetzt aus Cache initialisieren
-let THREAD_CACHE = loadCache();
+let THREAD_CACHE = [];
 let LAST_UPDATE = 0;
-
-// ---------------- Utils ----------------
+let IS_REFRESHING = false;
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -94,8 +65,6 @@ function getThreadUrl(threadId) {
   return `https://forum.theunity.de/index.php?thread/${threadId}/`;
 }
 
-// ---------------- Login ----------------
-
 async function loginToForum() {
   browser = await puppeteer.launch({
     headless: !DEBUG,
@@ -103,6 +72,7 @@ async function loginToForum() {
   });
 
   page = await browser.newPage();
+  crawlPage = await browser.newPage();
 
   await page.goto('https://forum.theunity.de/', { waitUntil: 'networkidle2' });
 
@@ -130,8 +100,6 @@ async function loginToForum() {
   console.log("Login abgeschlossen");
 }
 
-// ---------------- Posting ----------------
-
 async function fastInsert(text) {
   try {
     await page.evaluate((text) => {
@@ -157,8 +125,6 @@ async function fastInsert(text) {
     return false;
   }
 }
-
-// ---------------- Forum Post ----------------
 
 async function postToForum(message, author, threadId) {
   const now = new Date();
@@ -214,12 +180,9 @@ ${message}
   }
 }
 
-// ---------------- Thread Scraper ----------------
-
 async function extractThreadsFromPage() {
-  return await page.evaluate(() => {
+  return await crawlPage.evaluate(() => {
     const links = Array.from(document.querySelectorAll('a[href*="thread/"]'));
-
     const map = new Map();
 
     for (const a of links) {
@@ -240,7 +203,7 @@ async function extractThreadsFromPage() {
   });
 }
 
-async function crawlBoard(boardUrl, maxPages = 10) {
+async function crawlBoard(boardUrl, maxPages = 3) {
   const threads = new Map();
 
   let currentUrl = boardUrl;
@@ -249,7 +212,7 @@ async function crawlBoard(boardUrl, maxPages = 10) {
   while (currentUrl && pages < maxPages) {
     pages++;
 
-    await page.goto(currentUrl, { waitUntil: 'networkidle2' });
+    await crawlPage.goto(currentUrl, { waitUntil: 'networkidle2' });
 
     const pageThreads = await extractThreadsFromPage();
 
@@ -257,7 +220,7 @@ async function crawlBoard(boardUrl, maxPages = 10) {
       threads.set(t.id, t);
     }
 
-    const nextUrl = await page.evaluate(() => {
+    const nextUrl = await crawlPage.evaluate(() => {
       const next = document.querySelector('a.pagination__link[rel="next"]');
       return next ? next.href : null;
     });
@@ -268,68 +231,75 @@ async function crawlBoard(boardUrl, maxPages = 10) {
   return Array.from(threads.values());
 }
 
-async function refreshThreads() {
-  const all = new Map();
+async function refreshThreadsIncremental() {
+  console.log("Incremental refresh gestartet");
+
+  const existing = new Map(THREAD_CACHE.map(t => [t.id, t]));
+
+  let added = 0;
 
   for (const board of BOARDS) {
     try {
-      const threads = await crawlBoard(board, 5);
+      const threads = await crawlBoard(board, 2);
 
       for (const t of threads) {
-        all.set(t.id, t);
+        if (!existing.has(t.id)) {
+          THREAD_CACHE.push(t);
+          existing.set(t.id, t);
+          added++;
+        }
       }
     } catch (e) {
       console.log("Board error:", board, e.message);
     }
   }
 
-  THREAD_CACHE = Array.from(all.values());
   LAST_UPDATE = Date.now();
 
-  saveCache(THREAD_CACHE);
-
-  console.log(`Threads geladen: ${THREAD_CACHE.length}`);
+  console.log(`Increment fertig → Neu: ${added}, Gesamt: ${THREAD_CACHE.length}`);
 }
 
 async function refreshThreadsIfNeeded() {
   const now = Date.now();
 
+  if (IS_REFRESHING) return;
   if (now - LAST_UPDATE < 10 * 60 * 1000) return;
 
-  await refreshThreads();
-}
+  IS_REFRESHING = true;
 
-// ---------------- Discord ----------------
+  try {
+    await refreshThreadsIncremental();
+  } finally {
+    IS_REFRESHING = false;
+  }
+}
 
 client.once('clientReady', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
-
   await loginToForum();
-
-  // Cache ist sofort verfügbar
-  console.log("Cache geladen:", THREAD_CACHE.length);
-
-  // Hintergrund Refresh
-  refreshThreads();
+  await refreshThreadsIfNeeded();
 });
 
-// Autocomplete
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isAutocomplete()) {
-    await refreshThreadsIfNeeded();
+    try {
+      const focused = interaction.options.getFocused();
 
-    const focused = interaction.options.getFocused();
+      const filtered = THREAD_CACHE
+        .filter(t => t.name.toLowerCase().includes(focused.toLowerCase()))
+        .slice(0, 25);
 
-    const filtered = THREAD_CACHE
-      .filter(t => t.name.toLowerCase().includes(focused.toLowerCase()))
-      .slice(0, 25);
+      await interaction.respond(
+        filtered.map(t => ({
+          name: t.name.slice(0, 100),
+          value: t.id
+        }))
+      );
 
-    return interaction.respond(
-      filtered.map(t => ({
-        name: t.name.slice(0, 100),
-        value: t.id
-      }))
-    );
+      refreshThreadsIfNeeded().catch(() => {});
+    } catch {}
+
+    return;
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -344,11 +314,10 @@ client.on('interactionCreate', async (interaction) => {
     await postToForum(message, interaction.user.username, threadId);
 
     await interaction.channel.send(
-      `✅ Post erfolgreich ins Forum gesendet (Thread ${threadId})`
+      `Post erfolgreich ins Forum gesendet (Thread ${threadId})`
     );
 
     await interaction.editReply('OK');
-
   } catch (err) {
     console.log(err);
     await interaction.editReply('Fehler beim Posten');
