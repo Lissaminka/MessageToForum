@@ -39,8 +39,8 @@ let page;
 let crawlPage;
 
 let THREAD_CACHE = [];
+let THREAD_STATS = new Map();
 let LAST_UPDATE = 0;
-let IS_REFRESHING = false;
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -65,6 +65,47 @@ function getThreadUrl(threadId) {
   return `https://forum.theunity.de/index.php?thread/${threadId}/`;
 }
 
+function trackThreadUsage(threadId) {
+  const now = Date.now();
+
+  const existing = THREAD_STATS.get(threadId) || {
+    id: threadId,
+    useCount: 0,
+    lastUsed: 0
+  };
+
+  existing.useCount += 1;
+  existing.lastUsed = now;
+
+  THREAD_STATS.set(threadId, existing);
+}
+
+function scoreThread(threadName, query, threadId) {
+  const name = threadName.toLowerCase();
+  const q = query.toLowerCase();
+
+  let score = 0;
+
+  if (name === q) score += 1000;
+  else if (name.startsWith(q)) score += 500;
+  else if (name.includes(q)) score += 100;
+
+  const stats = THREAD_STATS.get(threadId);
+  if (stats) {
+    const recency = Math.max(
+      0,
+      1 - (Date.now() - stats.lastUsed) / (1000 * 60 * 60 * 24 * 7)
+    );
+
+    const freq = Math.log1p(stats.useCount);
+
+    score += recency * 300;
+    score += freq * 150;
+  }
+
+  return score;
+}
+
 async function loginToForum() {
   browser = await puppeteer.launch({
     headless: !DEBUG,
@@ -78,10 +119,7 @@ async function loginToForum() {
 
   const loginLink = await page.$('a.loginLink');
 
-  if (!loginLink) {
-    console.log("Session vorhanden");
-    return;
-  }
+  if (!loginLink) return;
 
   await page.evaluate(el => el.click(), loginLink);
 
@@ -96,8 +134,6 @@ async function loginToForum() {
     submitButton.click(),
     page.waitForNavigation({ waitUntil: 'networkidle2' })
   ]);
-
-  console.log("Login abgeschlossen");
 }
 
 async function fastInsert(text) {
@@ -172,12 +208,7 @@ ${message}
     );
 
     await submitButton.click();
-
-    console.log("Post erfolgreich übertragen");
-
-  } catch (err) {
-    console.log("Fehler:", err.message);
-  }
+  } catch {}
 }
 
 async function extractThreadsFromPage() {
@@ -203,9 +234,8 @@ async function extractThreadsFromPage() {
   });
 }
 
-async function crawlBoard(boardUrl, maxPages = 3) {
+async function crawlBoard(boardUrl, maxPages = 2) {
   const threads = new Map();
-
   let currentUrl = boardUrl;
   let pages = 0;
 
@@ -231,12 +261,9 @@ async function crawlBoard(boardUrl, maxPages = 3) {
   return Array.from(threads.values());
 }
 
-async function refreshThreadsIncremental() {
-  console.log("Incremental refresh gestartet");
-
+async function incrementalRefresh() {
   const existing = new Map(THREAD_CACHE.map(t => [t.id, t]));
-
-  let added = 0;
+  let newCount = 0;
 
   for (const board of BOARDS) {
     try {
@@ -244,62 +271,80 @@ async function refreshThreadsIncremental() {
 
       for (const t of threads) {
         if (!existing.has(t.id)) {
-          THREAD_CACHE.push(t);
           existing.set(t.id, t);
-          added++;
+          newCount++;
         }
       }
-    } catch (e) {
-      console.log("Board error:", board, e.message);
-    }
+    } catch {}
   }
 
+  THREAD_CACHE = Array.from(existing.values());
   LAST_UPDATE = Date.now();
 
-  console.log(`Increment fertig → Neu: ${added}, Gesamt: ${THREAD_CACHE.length}`);
+  fs.writeFileSync(
+    './cache/threads.json',
+    JSON.stringify({
+      threads: THREAD_CACHE,
+      stats: Array.from(THREAD_STATS.values())
+    }, null, 2)
+  );
+
+  console.log(`Increment fertig → Neu: ${newCount}, Gesamt: ${THREAD_CACHE.length}`);
+}
+
+function loadCache() {
+  try {
+    const data = JSON.parse(
+      fs.readFileSync('./cache/threads.json', 'utf-8')
+    );
+
+    THREAD_CACHE = data.threads || data;
+    const stats = data.stats || [];
+
+    for (const s of stats) {
+      THREAD_STATS.set(s.id, s);
+    }
+
+    console.log(`Cache geladen: ${THREAD_CACHE.length}`);
+  } catch {}
 }
 
 async function refreshThreadsIfNeeded() {
-  const now = Date.now();
-
-  if (IS_REFRESHING) return;
-  if (now - LAST_UPDATE < 10 * 60 * 1000) return;
-
-  IS_REFRESHING = true;
-
-  try {
-    await refreshThreadsIncremental();
-  } finally {
-    IS_REFRESHING = false;
-  }
+  if (Date.now() - LAST_UPDATE < 5 * 60 * 1000) return;
+  await incrementalRefresh();
 }
 
 client.once('clientReady', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await loginToForum();
-  await refreshThreadsIfNeeded();
+  loadCache();
+  await incrementalRefresh();
 });
 
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isAutocomplete()) {
     try {
-      const focused = interaction.options.getFocused();
+      await refreshThreadsIfNeeded();
 
-      const filtered = THREAD_CACHE
-        .filter(t => t.name.toLowerCase().includes(focused.toLowerCase()))
+      const focused = interaction.options.getFocused();
+      const query = focused.toLowerCase();
+
+      const ranked = THREAD_CACHE
+        .map(t => ({
+          ...t,
+          score: scoreThread(t.name, query, t.id)
+        }))
+        .filter(t => t.score > 0)
+        .sort((a, b) => b.score - a.score)
         .slice(0, 25);
 
-      await interaction.respond(
-        filtered.map(t => ({
+      return interaction.respond(
+        ranked.map(t => ({
           name: t.name.slice(0, 100),
           value: t.id
         }))
       );
-
-      refreshThreadsIfNeeded().catch(() => {});
     } catch {}
-
-    return;
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -313,13 +358,14 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await postToForum(message, interaction.user.username, threadId);
 
+    trackThreadUsage(threadId);
+
     await interaction.channel.send(
       `Post erfolgreich ins Forum gesendet (Thread ${threadId})`
     );
 
     await interaction.editReply('OK');
-  } catch (err) {
-    console.log(err);
+  } catch {
     await interaction.editReply('Fehler beim Posten');
   }
 });
