@@ -10,7 +10,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ]
+  ],
+  partials: ['MESSAGE', 'CHANNEL']
 });
 
 const FORUM_USERNAME = process.env.FORUM_USERNAME;
@@ -18,6 +19,11 @@ const FORUM_PASSWORD = process.env.FORUM_PASSWORD;
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 const DEBUG = process.env.DEBUG === 'true';
+
+const ENABLE_MIN_LENGTH_FILTER = process.env.ENABLE_MIN_LENGTH_FILTER === 'true';
+const MIN_MESSAGE_LENGTH = parseInt(process.env.MIN_MESSAGE_LENGTH || '1500', 10);
+
+const DEFAULT_THREAD_ID = '794';
 
 const BOARDS = [
   "https://forum.theunity.de/board/4-news-questions/",
@@ -59,6 +65,28 @@ function convertHtmlToBBCode(html) {
   bb = bb.replace(/<\/?[^>]+(>|$)/g, '');
 
   return bb.trim();
+}
+
+function buildForumMessage({ author, message, sourceName, replyText = '' }) {
+  const now = new Date();
+
+  const timestamp = now.toLocaleString('de-DE', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+
+  const source = sourceName ? ` in #${sourceName}` : '';
+
+  let forumMessage = `
+<strong>${author} schrieb am ${timestamp}${source}:</strong>
+
+${replyText}${message}
+`;
+
+  return convertHtmlToBBCode(forumMessage).replace(/\n/g, '\n\n');
 }
 
 function getThreadUrl(threadId) {
@@ -106,34 +134,58 @@ function scoreThread(threadName, query, threadId) {
   return score;
 }
 
+function getThreadMeta(threadId) {
+  return THREAD_CACHE.find(t => t.id === threadId) || null;
+}
+
 async function loginToForum() {
   browser = await puppeteer.launch({
     headless: !DEBUG,
-    slowMo: DEBUG ? 30 : 0
+    slowMo: DEBUG ? 30 : 0,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage'
+    ]
   });
 
   page = await browser.newPage();
   crawlPage = await browser.newPage();
 
-  await page.goto('https://forum.theunity.de/', { waitUntil: 'networkidle2' });
+  await page.bringToFront();
 
-  const loginLink = await page.$('a.loginLink');
+  await page.goto('https://forum.theunity.de/', {
+    waitUntil: 'networkidle2'
+  });
 
-  if (!loginLink) return;
+  await page.bringToFront();
 
-  await page.evaluate(el => el.click(), loginLink);
+  await page.waitForSelector('a.loginLink', { timeout: 15000 });
 
-  await page.waitForSelector('input#username', { visible: true });
+  await page.evaluate(() => {
+    const el = document.querySelector('a.loginLink');
+    if (el) el.click();
+  });
 
-  await page.type('input#username', FORUM_USERNAME);
-  await page.type('input[name="password"]', FORUM_PASSWORD);
+  await page.waitForSelector('input#username', {
+    visible: true,
+    timeout: 15000
+  });
 
-  const submitButton = await page.waitForSelector('input[type="submit"]', { visible: true });
+  await page.type('input#username', FORUM_USERNAME, { delay: 10 });
+  await page.type('input[name="password"]', FORUM_PASSWORD, { delay: 10 });
+
+  const submitButton = await page.waitForSelector('input[type="submit"]', {
+    visible: true,
+    timeout: 15000
+  });
 
   await Promise.all([
     submitButton.click(),
-    page.waitForNavigation({ waitUntil: 'networkidle2' })
+    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 })
   ]);
+
+  await page.bringToFront();
 }
 
 async function fastInsert(text) {
@@ -162,32 +214,81 @@ async function fastInsert(text) {
   }
 }
 
-async function postToForum(message, author, threadId) {
-  const now = new Date();
-
-  const timestamp = now.toLocaleString('de-DE', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
-
-  const forumMessage = convertHtmlToBBCode(`
-<strong>${author} schrieb am ${timestamp}:</strong>
-
-${message}
-`);
+async function postToForum(message, author, threadId, discordMessage, meta = null) {
+  let safeThreadId = DEFAULT_THREAD_ID;
 
   try {
-    await page.goto(getThreadUrl(threadId), {
+    const targetThreadId = threadId || DEFAULT_THREAD_ID;
+
+    safeThreadId = String(targetThreadId).match(/^\d+$/)
+      ? targetThreadId
+      : DEFAULT_THREAD_ID;
+
+    await page.goto(getThreadUrl(safeThreadId), {
       waitUntil: 'networkidle2'
     });
 
-    const editor = await page.waitForSelector('[contenteditable="true"]', { visible: true });
+    const now = new Date();
+
+    const timestamp = now.toLocaleString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    let replyText = '';
+
+    try {
+      let refMessage = null;
+
+      try {
+        const refId = discordMessage?.reference?.messageId;
+
+        if (refId) {
+          refMessage = await discordMessage.channel.messages
+            .fetch(refId)
+            .catch(() => null);
+
+          if (DEBUG) {
+            console.log("FETCHED REPLY:", refMessage?.content);
+          }
+        }
+      } catch (e) {
+        if (DEBUG) {
+          console.log("reply fetch failed:", e);
+        }
+      }
+
+      if (refMessage?.content) {
+        const short = refMessage.content.slice(0, 300);
+        const suffix = refMessage.content.length > 300 ? '...' : '';
+
+        replyText =
+`[b]Antwort auf ${refMessage.author?.username ?? 'Unbekannt'}:[/b]
+
+"${convertHtmlToBBCode(short)}${suffix}"
+
+`;
+      }
+    } catch (err) {
+      console.error("Reply extraction failed:", err);
+    }
+
+    const forumMessage = buildForumMessage({
+      author,
+      message,
+      sourceName: discordMessage?.channel?.name,
+      replyText
+    });
+
+    const editor = await page.waitForSelector('[contenteditable="true"]', {
+      visible: true
+    });
 
     await editor.click();
-    await sleep(100);
+    await sleep(150);
 
     await page.keyboard.down('Control');
     await page.keyboard.press('KeyA');
@@ -197,10 +298,10 @@ ${message}
     const success = await fastInsert(forumMessage);
 
     if (!success) {
-      await page.keyboard.type(forumMessage, { delay: 1 });
+      await page.keyboard.type(forumMessage, { delay: 2 });
     }
 
-    await sleep(200);
+    await sleep(300);
 
     const submitButton = await page.waitForSelector(
       'button.buttonPrimary[data-type="save"]',
@@ -208,7 +309,49 @@ ${message}
     );
 
     await submitButton.click();
-  } catch {}
+
+    console.log(`[ERFOLG] Nachricht von ${author} in Thread ${safeThreadId} gepostet.`);
+    console.log(`         Link: ${getThreadUrl(safeThreadId)}`);
+    console.log(`         Zeit : ${new Date().toLocaleString('de-DE')}`);
+
+    return {
+      threadUrl: getThreadUrl(safeThreadId),
+      threadId: safeThreadId
+    };
+
+  } catch (err) {
+    console.error("Post Fehler:", err);
+    console.error(`[FEHLER] Nachricht von ${author} konnte nicht in Thread ${threadId} gepostet werden.`);
+
+    return {
+      threadUrl: getThreadUrl(safeThreadId),
+      threadId: safeThreadId
+    };
+  }
+}
+
+function getBoardCategoryFromUrl(url) {
+  const match = url.match(/board\/(\d+-[^/]+)\//);
+  if (!match) return "?";
+
+  const key = decodeURIComponent(match[1]);
+
+  const map = {
+    "4-news-questions": "News & Questions",
+    "9-le-café-unité": "Le café unité",
+    "11-politik-gesellschaft": "Politik & Gesellschaft",
+    "10-out-of-space": "Out of space",
+    "13-entartete-kunst": "Entartete Kunst",
+    "14-texte-lyrics": "Texte & Lyrics",
+    "15-gegenwelt": "Gegenwelt",
+    "19-my-story": "My Story",
+    "27-eigene-projekte": "Eigene Projekte",
+    "22-mensa": "Mensa",
+    "23-public": "Public",
+    "26-müllhalde": "Müllhalde"
+  };
+
+  return map[key] || key;
 }
 
 async function extractThreadsFromPage() {
@@ -246,8 +389,13 @@ async function crawlBoard(boardUrl, maxPages = 2) {
 
     const pageThreads = await extractThreadsFromPage();
 
+    const boardName = getBoardCategoryFromUrl(boardUrl);
+
     for (const t of pageThreads) {
-      threads.set(t.id, t);
+      threads.set(t.id, {
+        ...t,
+        board: boardName
+      });
     }
 
     const nextUrl = await crawlPage.evaluate(() => {
@@ -275,7 +423,9 @@ async function incrementalRefresh() {
           newCount++;
         }
       }
-    } catch {}
+    } catch {
+      // Fehler beim Crawlen eines Boards ignorieren, mit naechstem fortfahren
+    }
   }
 
   THREAD_CACHE = Array.from(existing.values());
@@ -289,16 +439,14 @@ async function incrementalRefresh() {
     }, null, 2)
   );
 
-  console.log(`Increment fertig → Neu: ${newCount}, Gesamt: ${THREAD_CACHE.length}`);
+  console.log(`Increment fertig -> Neu: ${newCount}, Gesamt: ${THREAD_CACHE.length}`);
 }
 
 function loadCache() {
   try {
-    const data = JSON.parse(
-      fs.readFileSync('./cache/threads.json', 'utf-8')
-    );
+    const data = JSON.parse(fs.readFileSync('./cache/threads.json', 'utf-8'));
 
-    THREAD_CACHE = data.threads || data;
+    THREAD_CACHE = data.threads || [];
     const stats = data.stats || [];
 
     for (const s of stats) {
@@ -306,7 +454,9 @@ function loadCache() {
     }
 
     console.log(`Cache geladen: ${THREAD_CACHE.length}`);
-  } catch {}
+  } catch {
+    // Cache existiert noch nicht, wird beim naechsten Refresh erstellt
+  }
 }
 
 async function refreshThreadsIfNeeded() {
@@ -321,52 +471,183 @@ client.once('clientReady', async () => {
   await incrementalRefresh();
 });
 
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+
+  if (DEBUG) {
+    console.log("CONTENT:", message.content);
+    console.log("REFERENCE:", message.reference);
+    console.log("REFERENCED MESSAGE:", message.referencedMessage);
+  }
+
+  const enabled = ENABLE_MIN_LENGTH_FILTER;
+  const minLen = message.content.length >= MIN_MESSAGE_LENGTH;
+
+  const shouldPost = enabled && minLen;
+
+  if (!shouldPost) return;
+
+  await postToForum(
+    message.content,
+    message.author.username,
+    message.channel.name,
+    message
+  );
+});
+
 client.on('interactionCreate', async (interaction) => {
+
   if (interaction.isAutocomplete()) {
-    try {
-      await refreshThreadsIfNeeded();
+    const focused = interaction.options.getFocused();
+    const choices = THREAD_CACHE;
 
-      const focused = interaction.options.getFocused();
-      const query = focused.toLowerCase();
+    const scored = choices
+      .map(t => ({
+        name: `[${t.board}] ${t.name}`,
+        value: t.id,
+        score: scoreThread(t.name, focused, t.id)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 25);
 
-      const ranked = THREAD_CACHE
-        .map(t => ({
-          ...t,
-          score: scoreThread(t.name, query, t.id)
-        }))
-        .filter(t => t.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 25);
+    await interaction.respond(
+      scored.map(c => ({
+        name: c.name.slice(0, 100),
+        value: c.value
+      }))
+    );
 
-      return interaction.respond(
-        ranked.map(t => ({
-          name: t.name.slice(0, 100),
-          value: t.id
-        }))
-      );
-    } catch {}
+    return;
   }
 
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'posttoforum') return;
 
-  const threadId = interaction.options.getString('thread');
+  await interaction.deferReply();
+
   const message = interaction.options.getString('message');
+  const author = interaction.user.username;
 
-  await interaction.deferReply({ ephemeral: true });
+  if (interaction.commandName === 'posttoforum-reply') {
 
-  try {
-    await postToForum(message, interaction.user.username, threadId);
+    const thread = interaction.options.getString('thread');
+    const meta = THREAD_CACHE.find(t => t.id === thread);
 
-    trackThreadUsage(threadId);
-
-    await interaction.channel.send(
-      `Post erfolgreich ins Forum gesendet (Thread ${threadId})`
+    const result = await postToForum(
+      message,
+      author,
+      thread,
+      interaction,
+      meta
     );
 
-    await interaction.editReply('OK');
-  } catch {
-    await interaction.editReply('Fehler beim Posten');
+    await interaction.editReply(
+      `<@${interaction.user.id}> Nachricht erfolgreich ins Forum übertragen!\n\n` +
+      `[**Thread:** ${meta?.name || thread}, **Kategorie:** ${meta?.board || "unbekannt"}, **Link:** ${result.threadUrl}]`
+    );
+
+    if (thread) trackThreadUsage(thread);
+  }
+
+  if (interaction.commandName === 'posttoforum-new') {
+
+    const category = interaction.options.getString('category');
+    const title = interaction.options.getString('threadname');
+    const tagsRaw = interaction.options.getString('tags');
+
+    const categoryIdMap = {
+      "News & Questions": "4",
+      "Le café unité": "9",
+      "Politik & Gesellschaft": "11",
+      "Out of space": "10",
+      "Entartete Kunst": "13",
+      "Texte & Lyrics": "14",
+      "Gegenwelt": "15",
+      "My Story": "19",
+      "Eigene Projekte": "27",
+      "Mensa": "22",
+      "Public": "23",
+      "Müllhalde": "26"
+    };
+
+    let tags = [];
+
+    if (tagsRaw) {
+      tags = tagsRaw
+        .split(',')
+        .map(t => t.trim())
+        .filter(Boolean)
+        .map(t => t.slice(0, 29));
+
+      if (tags.length < 1) {
+        await interaction.editReply("Mindestens 1 Tag erforderlich.");
+        return;
+      }
+
+      if (tags.length > 10) tags = tags.slice(0, 10);
+    } else {
+      await interaction.editReply("Mindestens 1 Tag erforderlich.");
+      return;
+    }
+
+    const categoryId = categoryIdMap[category];
+    if (!categoryId) {
+      await interaction.editReply("Ungueltige Kategorie.");
+      return;
+    }
+
+    await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
+      waitUntil: 'networkidle2'
+    });
+
+    const titleInput = await page.waitForSelector('#subject', { visible: true });
+    await titleInput.type(title, { delay: 10 });
+
+    const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
+
+    for (const tag of tags) {
+      await tagInput.click();
+      await page.keyboard.type(tag, { delay: 10 });
+      await page.keyboard.press('Comma');
+      await sleep(120);
+    }
+
+    const editor = await page.waitForSelector('[contenteditable="true"]', {
+      visible: true
+    });
+
+    await editor.click();
+    await sleep(150);
+
+    const fullMessage = buildForumMessage({
+      author,
+      message,
+      sourceName: interaction.channel?.name
+    });
+
+    const success = await fastInsert(fullMessage);
+
+    if (!success) {
+      await page.keyboard.type(fullMessage, { delay: 2 });
+    }
+
+    await sleep(300);
+
+    const submitButton = await page.waitForSelector('input[value="Absenden"]', {
+      visible: true
+    });
+
+    await submitButton.click();
+
+    const finalUrl = page.url();
+
+    console.log(`[ERFOLG] Neuer Thread von ${author} erstellt.`);
+    console.log(`         Titel    : ${title}`);
+    console.log(`         Kategorie: ${category}`);
+    console.log(`         Zeit     : ${new Date().toLocaleString('de-DE')}`);
+
+    await interaction.editReply(
+      `<@${interaction.user.id}> Thread erfolgreich erstellt!\n\n[**Titel:** ${title}, **Kategorie:** ${category}, **Link:** ${finalUrl}]`
+    );
   }
 });
 
