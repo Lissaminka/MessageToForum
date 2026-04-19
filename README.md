@@ -1,5 +1,3 @@
-Deine README ist in mehreren Punkten veraltet. Hier eine vollständig überarbeitete Version, die den aktuellen Funktionsumfang korrekt abbildet:
-
 ```markdown
 # MessageToForum
 
