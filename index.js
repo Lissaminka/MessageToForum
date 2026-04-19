@@ -10,7 +10,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ]
+  ],
+  partials: ['MESSAGE', 'CHANNEL']
 });
 
 const FORUM_USERNAME = process.env.FORUM_USERNAME;
@@ -22,7 +23,6 @@ const DEBUG = process.env.DEBUG === 'true';
 const ENABLE_MIN_LENGTH_FILTER = process.env.ENABLE_MIN_LENGTH_FILTER === 'true';
 const MIN_MESSAGE_LENGTH = parseInt(process.env.MIN_MESSAGE_LENGTH || '1500', 10);
 
-// ✅ FIX: Default Thread für Autoposts
 const DEFAULT_THREAD_ID = '794';
 
 const BOARDS = [
@@ -67,7 +67,28 @@ function convertHtmlToBBCode(html) {
   return bb.trim();
 }
 
-/* ✅ FIX: safer thread URL (prevents slug routing issues) */
+function buildForumMessage({ author, message, sourceName, replyText = '' }) {
+  const now = new Date();
+
+  const timestamp = now.toLocaleString('de-DE', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+
+  const source = sourceName ? ` in #${sourceName}` : '';
+
+  let forumMessage = `
+<strong>${author} schrieb am ${timestamp}${source}:</strong>
+
+${replyText}${message}
+`;
+
+  return convertHtmlToBBCode(forumMessage).replace(/\n/g, '\n\n');
+}
+
 function getThreadUrl(threadId) {
   return `https://forum.theunity.de/index.php?thread/${threadId}/`;
 }
@@ -113,9 +134,10 @@ function scoreThread(threadName, query, threadId) {
   return score;
 }
 
-/* =========================
-   LOGIN
-========================= */
+function getThreadMeta(threadId) {
+  return THREAD_CACHE.find(t => t.id === threadId) || null;
+}
+
 async function loginToForum() {
   browser = await puppeteer.launch({
     headless: !DEBUG,
@@ -166,9 +188,6 @@ async function loginToForum() {
   await page.bringToFront();
 }
 
-/* =========================
-   FAST INSERT
-========================= */
 async function fastInsert(text) {
   try {
     await page.evaluate((text) => {
@@ -195,57 +214,73 @@ async function fastInsert(text) {
   }
 }
 
-/* =========================
-   POST (REPLY IMMER AKTIV + DEFAULT THREAD FIX)
-========================= */
-async function postToForum(message, author, threadId, discordMessage) {
-  const now = new Date();
-
-  const timestamp = now.toLocaleString('de-DE', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
-
-  let replyText = '';
-
-  if (discordMessage?.reference) {
-    try {
-      const ref = await discordMessage.fetchReference();
-
-      if (ref?.content) {
-        const short = ref.content.slice(0, 300);
-        const suffix = ref.content.length > 300 ? '...' : '';
-
-        replyText =
-`[b]Antwort auf ${ref.author.username}:[/b]
-"${convertHtmlToBBCode(short)}${suffix}"
-
-`;
-      }
-    } catch {}
-  }
-
-  const forumMessage = convertHtmlToBBCode(`
-<strong>${author} schrieb am ${timestamp}:</strong>
-
-${replyText}${message}
-`);
+async function postToForum(message, author, threadId, discordMessage, meta = null) {
+  let safeThreadId = DEFAULT_THREAD_ID;
 
   try {
-
-    // ✅ FIX: Autopost immer Thread 794, Slash Command bleibt frei
     const targetThreadId = threadId || DEFAULT_THREAD_ID;
 
-    // 🔒 safety: block slugs like "technikgedöns"
-    const safeThreadId = String(targetThreadId).match(/^\d+$/)
+    safeThreadId = String(targetThreadId).match(/^\d+$/)
       ? targetThreadId
       : DEFAULT_THREAD_ID;
 
     await page.goto(getThreadUrl(safeThreadId), {
       waitUntil: 'networkidle2'
+    });
+
+    const now = new Date();
+
+    const timestamp = now.toLocaleString('de-DE', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    let replyText = '';
+
+    try {
+      let refMessage = null;
+
+      try {
+        const refId = discordMessage?.reference?.messageId;
+
+        if (refId) {
+          refMessage = await discordMessage.channel.messages
+            .fetch(refId)
+            .catch(() => null);
+
+          if (DEBUG) {
+            console.log("FETCHED REPLY:", refMessage?.content);
+          }
+        }
+      } catch (e) {
+        if (DEBUG) {
+          console.log("reply fetch failed:", e);
+        }
+      }
+
+      if (refMessage?.content) {
+        const short = refMessage.content.slice(0, 300);
+        const suffix = refMessage.content.length > 300 ? '...' : '';
+
+        replyText =
+`[b]Antwort auf ${refMessage.author?.username ?? 'Unbekannt'}:[/b]
+
+"${convertHtmlToBBCode(short)}${suffix}"
+
+`;
+      }
+    } catch (err) {
+      console.error("Reply extraction failed:", err);
+    }
+
+    const forumMessage = buildForumMessage({
+      author,
+      message,
+      sourceName: discordMessage?.channel?.name,
+      replyText
     });
 
     const editor = await page.waitForSelector('[contenteditable="true"]', {
@@ -274,14 +309,27 @@ ${replyText}${message}
     );
 
     await submitButton.click();
+
+    console.log(`[ERFOLG] Nachricht von ${author} in Thread ${safeThreadId} gepostet.`);
+    console.log(`         Link: ${getThreadUrl(safeThreadId)}`);
+    console.log(`         Zeit : ${new Date().toLocaleString('de-DE')}`);
+
+    return {
+      threadUrl: getThreadUrl(safeThreadId),
+      threadId: safeThreadId
+    };
+
   } catch (err) {
     console.error("Post Fehler:", err);
+    console.error(`[FEHLER] Nachricht von ${author} konnte nicht in Thread ${threadId} gepostet werden.`);
+
+    return {
+      threadUrl: getThreadUrl(safeThreadId),
+      threadId: safeThreadId
+    };
   }
 }
 
-/* =========================
-   THREAD CRAWLER
-========================= */
 function getBoardCategoryFromUrl(url) {
   const match = url.match(/board\/(\d+-[^/]+)\//);
   if (!match) return "?";
@@ -361,10 +409,6 @@ async function crawlBoard(boardUrl, maxPages = 2) {
   return Array.from(threads.values());
 }
 
-/* =========================
-   CACHE + DISCORD
-========================= */
-
 async function incrementalRefresh() {
   const existing = new Map(THREAD_CACHE.map(t => [t.id, t]));
   let newCount = 0;
@@ -379,7 +423,9 @@ async function incrementalRefresh() {
           newCount++;
         }
       }
-    } catch {}
+    } catch {
+      // Fehler beim Crawlen eines Boards ignorieren, mit naechstem fortfahren
+    }
   }
 
   THREAD_CACHE = Array.from(existing.values());
@@ -393,7 +439,7 @@ async function incrementalRefresh() {
     }, null, 2)
   );
 
-  console.log(`Increment fertig → Neu: ${newCount}, Gesamt: ${THREAD_CACHE.length}`);
+  console.log(`Increment fertig -> Neu: ${newCount}, Gesamt: ${THREAD_CACHE.length}`);
 }
 
 function loadCache() {
@@ -408,7 +454,9 @@ function loadCache() {
     }
 
     console.log(`Cache geladen: ${THREAD_CACHE.length}`);
-  } catch {}
+  } catch {
+    // Cache existiert noch nicht, wird beim naechsten Refresh erstellt
+  }
 }
 
 async function refreshThreadsIfNeeded() {
@@ -423,18 +471,19 @@ client.once('clientReady', async () => {
   await incrementalRefresh();
 });
 
-/* =========================
-   MESSAGE HANDLER
-========================= */
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  if (DEBUG) {
+    console.log("CONTENT:", message.content);
+    console.log("REFERENCE:", message.reference);
+    console.log("REFERENCED MESSAGE:", message.referencedMessage);
+  }
 
   const enabled = ENABLE_MIN_LENGTH_FILTER;
   const minLen = message.content.length >= MIN_MESSAGE_LENGTH;
 
-  const shouldPost =
-    (enabled && minLen) ||
-    (!enabled && false);
+  const shouldPost = enabled && minLen;
 
   if (!shouldPost) return;
 
@@ -444,6 +493,162 @@ client.on('messageCreate', async (message) => {
     message.channel.name,
     message
   );
+});
+
+client.on('interactionCreate', async (interaction) => {
+
+  if (interaction.isAutocomplete()) {
+    const focused = interaction.options.getFocused();
+    const choices = THREAD_CACHE;
+
+    const scored = choices
+      .map(t => ({
+        name: `[${t.board}] ${t.name}`,
+        value: t.id,
+        score: scoreThread(t.name, focused, t.id)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 25);
+
+    await interaction.respond(
+      scored.map(c => ({
+        name: c.name.slice(0, 100),
+        value: c.value
+      }))
+    );
+
+    return;
+  }
+
+  if (!interaction.isChatInputCommand()) return;
+
+  await interaction.deferReply();
+
+  const message = interaction.options.getString('message');
+  const author = interaction.user.username;
+
+  if (interaction.commandName === 'posttoforum-reply') {
+
+    const thread = interaction.options.getString('thread');
+    const meta = THREAD_CACHE.find(t => t.id === thread);
+
+    const result = await postToForum(
+      message,
+      author,
+      thread,
+      interaction,
+      meta
+    );
+
+    await interaction.editReply(
+      `<@${interaction.user.id}> Nachricht erfolgreich ins Forum übertragen!\n\n` +
+      `[**Thread:** ${meta?.name || thread}, **Kategorie:** ${meta?.board || "unbekannt"}, **Link:** ${result.threadUrl}]`
+    );
+
+    if (thread) trackThreadUsage(thread);
+  }
+
+  if (interaction.commandName === 'posttoforum-new') {
+
+    const category = interaction.options.getString('category');
+    const title = interaction.options.getString('threadname');
+    const tagsRaw = interaction.options.getString('tags');
+
+    const categoryIdMap = {
+      "News & Questions": "4",
+      "Le café unité": "9",
+      "Politik & Gesellschaft": "11",
+      "Out of space": "10",
+      "Entartete Kunst": "13",
+      "Texte & Lyrics": "14",
+      "Gegenwelt": "15",
+      "My Story": "19",
+      "Eigene Projekte": "27",
+      "Mensa": "22",
+      "Public": "23",
+      "Müllhalde": "26"
+    };
+
+    let tags = [];
+
+    if (tagsRaw) {
+      tags = tagsRaw
+        .split(',')
+        .map(t => t.trim())
+        .filter(Boolean)
+        .map(t => t.slice(0, 29));
+
+      if (tags.length < 1) {
+        await interaction.editReply("Mindestens 1 Tag erforderlich.");
+        return;
+      }
+
+      if (tags.length > 10) tags = tags.slice(0, 10);
+    } else {
+      await interaction.editReply("Mindestens 1 Tag erforderlich.");
+      return;
+    }
+
+    const categoryId = categoryIdMap[category];
+    if (!categoryId) {
+      await interaction.editReply("Ungueltige Kategorie.");
+      return;
+    }
+
+    await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
+      waitUntil: 'networkidle2'
+    });
+
+    const titleInput = await page.waitForSelector('#subject', { visible: true });
+    await titleInput.type(title, { delay: 10 });
+
+    const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
+
+    for (const tag of tags) {
+      await tagInput.click();
+      await page.keyboard.type(tag, { delay: 10 });
+      await page.keyboard.press('Comma');
+      await sleep(120);
+    }
+
+    const editor = await page.waitForSelector('[contenteditable="true"]', {
+      visible: true
+    });
+
+    await editor.click();
+    await sleep(150);
+
+    const fullMessage = buildForumMessage({
+      author,
+      message,
+      sourceName: interaction.channel?.name
+    });
+
+    const success = await fastInsert(fullMessage);
+
+    if (!success) {
+      await page.keyboard.type(fullMessage, { delay: 2 });
+    }
+
+    await sleep(300);
+
+    const submitButton = await page.waitForSelector('input[value="Absenden"]', {
+      visible: true
+    });
+
+    await submitButton.click();
+
+    const finalUrl = page.url();
+
+    console.log(`[ERFOLG] Neuer Thread von ${author} erstellt.`);
+    console.log(`         Titel    : ${title}`);
+    console.log(`         Kategorie: ${category}`);
+    console.log(`         Zeit     : ${new Date().toLocaleString('de-DE')}`);
+
+    await interaction.editReply(
+      `<@${interaction.user.id}> Thread erfolgreich erstellt!\n\n[**Titel:** ${title}, **Kategorie:** ${category}, **Link:** ${finalUrl}]`
+    );
+  }
 });
 
 client.login(DISCORD_TOKEN);

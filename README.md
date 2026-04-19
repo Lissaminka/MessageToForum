@@ -1,28 +1,28 @@
+Deine README ist in mehreren Punkten veraltet. Hier eine vollständig überarbeitete Version, die den aktuellen Funktionsumfang korrekt abbildet:
+
+```markdown
 # MessageToForum
 
-**MessageToForum** is a Node.js bot that automatically posts long Discord messages to a forum, keeping your community content synchronized between Discord and the forum.
+**MessageToForum** is a Node.js bot that bridges Discord and a WoltLab-based forum. It automatically posts long Discord messages to the forum and provides slash commands for manual posting and thread creation.
 
 ## Features
 
-* Automatically transfers longer messages (configurable minimum length) to the forum.
-* Reply functionality: preserves message references to maintain context.
-* Automatic navigation to the latest thread page.
-* Optional debug mode (`DEBUG=true` in `.env`) with full Puppeteer visibility.
-* Secure forum login via environment variables.
-* Marker warnings removed for clean logs.
+- **Automatic message transfer**: Messages exceeding a configurable minimum length are automatically posted to a default forum thread.
+- **Reply context preservation**: For automatically posted messages (those meeting the minimum length threshold), replies include a quote of the referenced Discord message in the forum post.
+- **Slash commands**: Manual control via Discord commands:
+  - `/posttoforum-reply` – Post a message to an existing thread (with autocomplete thread selection).
+  - `/posttoforum-new` – Create a new thread with title, category, tags, and initial message.
+- **Thread cache with smart ranking**: Autocomplete suggestions are ranked by name match quality, recency of use, and usage frequency.
+- **Automatic thread discovery**: The bot crawls all configured boards and maintains an up-to-date thread cache.
+- **Persistent usage statistics**: Thread usage is tracked and saved between restarts.
+- **Debug mode**: Set `DEBUG=true` for visible browser window and verbose console output.
+- **Secure credential management**: All sensitive data stored in `.env` file.
 
-## Known Limitations
+## Requirements
 
-* Currently, passwords with special characters can cause login issues.
-  It is recommended to use long passwords (>64 characters) consisting of uppercase and lowercase letters and numbers.
-
-## Planned Features
-
-1. **Slash command on Discord:** Direct control of the bot via Discord commands.
-2. **Mapping for editing messages:** Allows updates of edited Discord messages in the forum.
-3. **Thread mapping:** Support for multiple threads with automatic assignment.
-4. **Automatic bot confirmation message:** After creating a long message, the bot will ask whether the content should also be posted in the forum.
-5. **User-friendly `.env` interface:** Easier configuration of credentials and settings.
+- Node.js 18 or higher
+- A Discord bot with appropriate permissions
+- Forum account credentials
 
 ## Installation
 
@@ -39,27 +39,34 @@ cd MessageToForum
 npm install
 ```
 
-3. Create a `.env` file (see `.env.example`) and fill in your Discord token and forum credentials.
+3. Create required directories:
 
-4. Start the bot:
+```bash
+mkdir -p cache
+```
+
+4. Create a `.env` file based on the example below and fill in your credentials.
+
+5. Register the slash commands:
+
+```bash
+node registerCommands.js
+```
+
+6. Start the bot:
 
 ```bash
 node index.js
 ```
 
-5. (Optional) Start the Express server:
-
-```bash
-node server.js
-```
-
 ## Configuration
 
-The main settings are stored in the `.env` file. You can adjust the minimum message length (`MIN_MESSAGE_LENGTH`) here if desired:
+Create a `.env` file with the following variables:
 
 ```env
 # Discord
 DISCORD_TOKEN=your_discord_token
+CLIENT_ID=your_discord_application_client_id
 
 # Forum
 FORUM_USERNAME=your_forum_username
@@ -67,14 +74,82 @@ FORUM_PASSWORD=your_forum_password
 
 # Optional
 DEBUG=false
-PORT=3000
+ENABLE_MIN_LENGTH_FILTER=true
 MIN_MESSAGE_LENGTH=1500
 ```
 
-**Note:** `MIN_MESSAGE_LENGTH` is the threshold (number of characters) a Discord message must reach before it gets posted to the forum. Adjust this value to suit your needs.
+| Variable | Description |
+|----------|-------------|
+| `DISCORD_TOKEN` | Your Discord bot token |
+| `CLIENT_ID` | Your Discord application client ID (required for slash command registration) |
+| `FORUM_USERNAME` | Forum login username |
+| `FORUM_PASSWORD` | Forum login password |
+| `DEBUG` | Set to `true` to show browser window and verbose logs |
+| `ENABLE_MIN_LENGTH_FILTER` | Set to `false` to disable automatic posting entirely |
+| `MIN_MESSAGE_LENGTH` | Minimum character count to trigger automatic posting |
+
+## Usage
+
+### Automatic Posting
+
+When `ENABLE_MIN_LENGTH_FILTER` is `true`, any Discord message (not from a bot) that meets or exceeds `MIN_MESSAGE_LENGTH` characters will be automatically posted to the default thread (ID: `794`).
+
+Replies to other messages will include a quote of the referenced message in the forum post.
+
+### Slash Commands
+
+#### `/posttoforum-reply`
+
+Post a message to an existing thread.
+
+| Option | Description |
+|--------|-------------|
+| `thread` | Select a thread (autocomplete enabled, ranked by relevance and usage) |
+| `message` | The message content to post |
+
+#### `/posttoforum-new`
+
+Create a new thread with an initial message.
+
+| Option | Description |
+|--------|-------------|
+| `category` | Forum category for the new thread |
+| `threadname` | Title of the new thread |
+| `tags` | Comma-separated tags (minimum 1, maximum 10, max 30 characters each) |
+| `message` | Initial message content |
+
+## Project Structure
+
+```
+.
+├── index.js              # Main bot application
+├── registerCommands.js   # Slash command registration script
+├── cache/
+│   └── threads.json      # Persistent thread cache and usage statistics
+├── .env                  # Environment variables (not committed)
+├── .env.example          # Example environment configuration
+├── package.json          # Dependencies and scripts
+└── README.md             # This file
+```
+
+## Known Limitations
+
+- Passwords containing special characters may cause login issues. Use long passwords (>64 characters) consisting of letters and numbers only.
+- The bot uses a single browser instance; concurrent posting operations will be processed sequentially.
+- Edited Discord messages are not synchronized to the forum (planned feature).
+- Deleted Discord messages are not removed from the forum (planned feature).
+
+## Planned Features
+
+1. **Queue system**: Prevent race conditions when multiple messages are sent simultaneously.
+2. **Edit synchronization**: Update forum posts when Discord messages are edited.
+3. **Multi-thread mapping**: Assign Discord channels to specific forum threads.
+4. **Confirmation dialog**: Ask users whether they want to post long messages instead of automatic posting.
+5. **Web interface**: User-friendly configuration panel for `.env` settings.
 
 ## License
 
 This project is open source under the MIT License.
+```
 
 ---
