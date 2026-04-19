@@ -1,4 +1,3 @@
-```markdown
 # MessageToForum
 
 **MessageToForum** is a Node.js bot that bridges Discord and a WoltLab-based forum. It automatically posts long Discord messages to the forum and provides slash commands for manual posting and thread creation.
@@ -148,6 +147,5 @@ Create a new thread with an initial message.
 ## License
 
 This project is open source under the MIT License.
-```
 
 ---
