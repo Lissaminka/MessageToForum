@@ -499,7 +499,6 @@ client.on('messageCreate', async (message) => {
   );
 });
 
-// ========== NEU: Postbox‑Workflow über 📮‑Reaktion starten ==========
 // ========== Postbox‑Workflow über 📮‑Reaktion starten ==========
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
