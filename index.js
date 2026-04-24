@@ -42,6 +42,26 @@ let THREAD_CACHE = [];
 let THREAD_STATS = new Map();
 let LAST_UPDATE = 0;
 
+<<<<<<< Updated upstream
+=======
+// Speichert für jeden Nutzer die Daten der Nachricht, auf die reagiert wurde
+const postboxSessions = new Map(); // userId -> { messageId, content, author, channelId }
+
+// Einfache serielle Warteschlange für Puppeteer-Aktionen
+let taskQueue = Promise.resolve();
+const FLOOD_COOLDOWN_MS = 11000; // 11 Sekunden (10 s Forum-Cooldown + 1 s Puffer)
+
+function enqueue(fn) {
+  const task = taskQueue.then(async () => {
+    const result = await fn();
+    await sleep(FLOOD_COOLDOWN_MS);
+    return result;
+  });
+  taskQueue = task.catch(() => {});
+  return task;
+}
+
+>>>>>>> Stashed changes
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
@@ -321,6 +341,79 @@ client.once('clientReady', async () => {
   await incrementalRefresh();
 });
 
+<<<<<<< Updated upstream
+=======
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+
+  if (DEBUG) {
+    console.log("CONTENT:", message.content);
+    console.log("REFERENCE:", message.reference);
+    console.log("REFERENCED MESSAGE:", message.referencedMessage);
+  }
+
+  const enabled = ENABLE_MIN_LENGTH_FILTER;
+  const minLen = message.content.length >= MIN_MESSAGE_LENGTH;
+
+  const shouldPost = enabled && minLen;
+
+  if (!shouldPost) return;
+
+  await enqueue(() => postToForum(
+    message.content,
+    message.author.username,
+    DEFAULT_THREAD_ID,
+    message
+  ));
+});
+
+// ========== Postbox‑Workflow über 📮‑Reaktion starten ==========
+client.on('messageReactionAdd', async (reaction, user) => {
+  if (user.bot) return;
+  if (reaction.emoji.name !== '📮') return;
+
+  try {
+    if (reaction.partial) await reaction.fetch();
+    if (reaction.message.partial) await reaction.message.fetch();
+
+    const message = reaction.message;
+
+    // Session anlegen
+    postboxSessions.set(user.id, {
+      messageId: message.id,
+      content: message.content,
+      author: message.author.username,
+      channelId: message.channel.id,
+      channelName: message.channel.name
+    });
+
+    // Ephemeral-Button im Kanal senden
+    const row = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(`postbox_start:${message.id}`)
+          .setLabel('📬 Beitrag posten')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+    await message.reply({
+      content: `<@${user.id}>, möchtest du diesen Beitrag ins Forum übertragen?`,
+      components: [row],
+      allowedMentions: { users: [user.id] }
+    });
+
+    await reaction.users.remove(user.id);
+  } catch (error) {
+    console.error('Fehler beim Starten des Postbox-Workflows:', error);
+    try {
+      await message.channel.send({
+        content: `<@${user.id}> ❌ Etwas ist schiefgelaufen.`
+      });
+    } catch {}
+  }
+});
+
+>>>>>>> Stashed changes
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isAutocomplete()) {
     try {
@@ -329,7 +422,362 @@ client.on('interactionCreate', async (interaction) => {
       const focused = interaction.options.getFocused();
       const query = focused.toLowerCase();
 
+<<<<<<< Updated upstream
       const ranked = THREAD_CACHE
+=======
+    await interaction.respond(
+      scored.map(c => ({
+        name: c.name.slice(0, 100),
+        value: c.value
+      }))
+    );
+
+    return;
+  }
+
+  // ========== Bestehende Slash‑Commands ==========
+  if (interaction.isChatInputCommand()) {
+    await interaction.deferReply();
+
+    const message = interaction.options.getString('message');
+    const author = interaction.user.username;
+
+    if (interaction.commandName === 'posttoforum-reply') {
+
+      const thread = interaction.options.getString('thread');
+      const meta = THREAD_CACHE.find(t => t.id === thread);
+
+      const result = await enqueue(() => postToForum(
+        message,
+        author,
+        thread,
+        interaction,
+        meta
+      ));
+
+      await interaction.editReply(
+        `<@${interaction.user.id}> Nachricht erfolgreich ins Forum übertragen!\n\n` +
+        `[**Thread:** ${meta?.name || thread}, **Kategorie:** ${meta?.board || "unbekannt"}, **Link:** ${result.threadUrl}]`
+      );
+
+      if (thread) trackThreadUsage(thread);
+    }
+
+    if (interaction.commandName === 'posttoforum-new') {
+
+      const category = interaction.options.getString('category');
+      const title = interaction.options.getString('threadname');
+      const tagsRaw = interaction.options.getString('tags');
+
+      const categoryIdMap = {
+        "News & Questions": "4",
+        "Le café unité": "9",
+        "Politik & Gesellschaft": "11",
+        "Out of space": "10",
+        "Entartete Kunst": "13",
+        "Texte & Lyrics": "14",
+        "Gegenwelt": "15",
+        "My Story": "19",
+        "Eigene Projekte": "27",
+        "Mensa": "22",
+        "Public": "23",
+        "Müllhalde": "26"
+      };
+
+      let tags = [];
+
+      if (tagsRaw) {
+        tags = tagsRaw
+          .split(',')
+          .map(t => t.trim())
+          .filter(Boolean)
+          .map(t => t.slice(0, 29));
+
+        if (tags.length < 1) {
+          await interaction.editReply("Mindestens 1 Tag erforderlich.");
+          return;
+        }
+
+        if (tags.length > 10) tags = tags.slice(0, 10);
+      } else {
+        await interaction.editReply("Mindestens 1 Tag erforderlich.");
+        return;
+      }
+
+      const categoryId = categoryIdMap[category];
+      if (!categoryId) {
+        await interaction.editReply("Ungueltige Kategorie.");
+        return;
+      }
+
+      const finalUrl = await enqueue(async () => {
+        await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
+          waitUntil: 'networkidle2'
+        });
+
+        const titleInput = await page.waitForSelector('#subject', { visible: true });
+        await titleInput.type(title, { delay: 10 });
+
+        const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
+
+        for (const tag of tags) {
+          await tagInput.click();
+          await page.keyboard.type(tag, { delay: 10 });
+          await page.keyboard.press('Comma');
+          await sleep(120);
+        }
+
+        const editor = await page.waitForSelector('[contenteditable="true"]', {
+          visible: true
+        });
+
+        await editor.click();
+        await sleep(150);
+
+        const fullMessage = buildForumMessage({
+          author,
+          message,
+          sourceName: interaction.channel?.name
+        });
+
+        const success = await fastInsert(fullMessage);
+
+        if (!success) {
+          await page.keyboard.type(fullMessage, { delay: 2 });
+        }
+
+        await sleep(300);
+
+        const submitButton = await page.waitForSelector('input[value="Absenden"]', {
+          visible: true
+        });
+
+        await Promise.all([
+          submitButton.click(),
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 })
+        ]);
+
+        return page.url();
+      });
+
+      console.log(`[ERFOLG] Neuer Thread von ${author} erstellt.`);
+      console.log(`         Titel    : ${title}`);
+      console.log(`         Kategorie: ${category}`);
+      console.log(`         Zeit     : ${new Date().toLocaleString('de-DE')}`);
+
+      await interaction.editReply(
+        `<@${interaction.user.id}> Thread erfolgreich erstellt!\n\n[**Titel:** ${title}, **Kategorie:** ${category}, **Link:** ${finalUrl}]`
+      );
+    }
+
+    return; // Wichtig: Nach Slash‑Commands nicht weiter verarbeiten
+  }
+
+  // ========== Button für Postbox‑Start ==========
+  if (interaction.isButton()) {
+    if (interaction.customId.startsWith('postbox_start:')) {
+      const messageId = interaction.customId.split(':')[1];
+      const session = postboxSessions.get(interaction.user.id);
+
+      if (!session || session.messageId !== messageId) {
+        await interaction.reply({ content: '❌ Sitzung abgelaufen.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const row = new ActionRowBuilder()
+        .addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`postbox_action:${messageId}`)
+            .setPlaceholder('Was möchtest du tun?')
+            .addOptions([
+              { label: 'Neuen Thread erstellen', value: 'new' },
+              { label: 'Thread antworten', value: 'reply' }
+            ])
+        );
+
+      await interaction.reply({
+        content: '📬 Wähle eine Aktion:',
+        components: [row],
+        flags: MessageFlags.Ephemeral
+      });
+    }
+  }
+
+  // ========== NEU: Select‑Menü für Postbox‑Workflow ==========
+  if (interaction.isStringSelectMenu()) {
+    const customId = interaction.customId;
+
+    // Erstes Menü: Aktion wählen (new / reply)
+    if (customId.startsWith('postbox_action:')) {
+      const messageId = customId.split(':')[1];
+      const session = postboxSessions.get(interaction.user.id);
+
+      if (!session || session.messageId !== messageId) {
+        await interaction.reply({ content: '❌ Sitzung abgelaufen oder ungültig.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const action = interaction.values[0];
+
+      if (action === 'new') {
+        // Menü für Kategorieauswahl
+        const categoryIdMap = {
+          "News & Questions": "4",
+          "Le café unité": "9",
+          "Politik & Gesellschaft": "11",
+          "Out of space": "10",
+          "Entartete Kunst": "13",
+          "Texte & Lyrics": "14",
+          "Gegenwelt": "15",
+          "My Story": "19",
+          "Eigene Projekte": "27",
+          "Mensa": "22",
+          "Public": "23",
+          "Müllhalde": "26"
+        };
+
+        const categoryOptions = Object.keys(categoryIdMap).map(name => ({
+          label: name,
+          value: name
+        }));
+
+        const row = new ActionRowBuilder()
+          .addComponents(
+            new StringSelectMenuBuilder()
+              .setCustomId(`postbox_new_category:${messageId}`)
+              .setPlaceholder('Wähle eine Kategorie')
+              .addOptions(categoryOptions)
+          );
+
+        await interaction.reply({
+          content: '📂 **Neuen Thread erstellen**\nWähle die Kategorie:',
+          components: [row],
+          flags: MessageFlags.Ephemeral
+        });
+      } else if (action === 'reply') {
+        // Modal für Suchbegriff öffnen
+        const modal = new ModalBuilder()
+          .setCustomId(`postbox_reply_search:${messageId}`)
+          .setTitle('Thread suchen');
+
+        const input = new TextInputBuilder()
+          .setCustomId('searchQuery')
+          .setLabel('Thread‑Name oder Stichwort')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('z. B. "Unity News"')
+          .setRequired(true);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+
+        await interaction.showModal(modal);
+      }
+    }
+
+    // Kategorie für neuen Thread gewählt
+    else if (customId.startsWith('postbox_new_category:')) {
+      const messageId = customId.split(':')[1];
+      const category = interaction.values[0];
+      const session = postboxSessions.get(interaction.user.id);
+
+      if (!session || session.messageId !== messageId) {
+        await interaction.reply({ content: '❌ Sitzung abgelaufen.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Modal für Titel und Tags
+      const modal = new ModalBuilder()
+        .setCustomId(`postbox_new_details:${messageId}:${category}`)
+        .setTitle('Neuer Thread – Details');
+
+      const titleInput = new TextInputBuilder()
+        .setCustomId('threadTitle')
+        .setLabel('Titel des Threads')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const tagsInput = new TextInputBuilder()
+        .setCustomId('threadTags')
+        .setLabel('Tags (kommagetrennt)')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('z. B. Unity, Diskussion, News')
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(titleInput),
+        new ActionRowBuilder().addComponents(tagsInput)
+      );
+
+      await interaction.showModal(modal);
+    }
+
+    // Auswahl eines Threads nach Suche (reply)
+    else if (customId.startsWith('postbox_reply_select:')) {
+      const messageId = customId.split(':')[1];
+      const threadId = interaction.values[0];
+      const session = postboxSessions.get(interaction.user.id);
+
+      if (!session || session.messageId !== messageId) {
+        await interaction.reply({ content: '❌ Sitzung abgelaufen.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      const meta = THREAD_CACHE.find(t => t.id === threadId);
+      const result = await enqueue(() => postToForum(
+        session.content,
+        session.author,
+        threadId,
+        { channel: { name: session.channelName } },
+        meta
+      ));
+
+      trackThreadUsage(threadId);
+
+      // Öffentliche Bestätigung im ursprünglichen Kanal
+      try {
+        const sourceChannel = await client.channels.fetch(session.channelId);
+        if (sourceChannel) {
+          await sourceChannel.send(
+            `<@${interaction.user.id}> Nachricht erfolgreich ins Forum übertragen!\n\n` +
+            `[**Thread:** ${meta?.name || threadId}, **Kategorie:** ${meta?.board || "unbekannt"}, **Link:** ${result.threadUrl}]`
+          );
+        }
+      } catch (err) {
+        console.error('Fehler beim Senden der öffentlichen Bestätigung:', err);
+      }
+
+      postboxSessions.delete(interaction.user.id);
+
+      await interaction.editReply({
+        content: '✅ Erledigt! Die Bestätigung wurde im Kanal gepostet.',
+      });
+    }
+  }
+
+  // ========== NEU: Modal‑Submit für Postbox‑Workflow ==========
+  if (interaction.isModalSubmit()) {
+    const customId = interaction.customId;
+
+    // Modal für Thread‑Suche (reply)
+    if (customId.startsWith('postbox_reply_search:')) {
+      const messageId = customId.split(':')[1];
+      const session = postboxSessions.get(interaction.user.id);
+
+      if (!session || session.messageId !== messageId) {
+        await interaction.reply({ content: '❌ Sitzung abgelaufen.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const query = interaction.fields.getTextInputValue('searchQuery').trim();
+      if (!query) {
+        await interaction.reply({ content: '❌ Bitte gib einen Suchbegriff ein.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Threads durchsuchen und scoren (wie Autocomplete)
+      const scored = THREAD_CACHE
+>>>>>>> Stashed changes
         .map(t => ({
           ...t,
           score: scoreThread(t.name, query, t.id)
@@ -338,9 +786,54 @@ client.on('interactionCreate', async (interaction) => {
         .sort((a, b) => b.score - a.score)
         .slice(0, 25);
 
+<<<<<<< Updated upstream
       return interaction.respond(
         ranked.map(t => ({
           name: t.name.slice(0, 100),
+=======
+      if (scored.length === 0) {
+        await interaction.reply({ content: '🔍 Keine passenden Threads gefunden.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (scored.length === 1) {
+        // Genau ein Treffer – direkt posten
+        const thread = scored[0];
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const result = await enqueue(() => postToForum(
+          session.content,
+          session.author,
+          thread.id,
+          { channel: { name: session.channelName } },
+          thread
+        ));
+
+        trackThreadUsage(thread.id);
+
+        // Öffentliche Bestätigung im ursprünglichen Kanal
+        try {
+          const sourceChannel = await client.channels.fetch(session.channelId);
+          if (sourceChannel) {
+            await sourceChannel.send(
+              `<@${interaction.user.id}> Nachricht erfolgreich ins Forum übertragen!\n\n` +
+              `[**Thread:** ${thread.name}, **Kategorie:** ${thread.board || "unbekannt"}, **Link:** ${result.threadUrl}]`
+            );
+          }
+        } catch (err) {
+          console.error('Fehler beim Senden der öffentlichen Bestätigung:', err);
+        }
+
+        postboxSessions.delete(interaction.user.id);
+
+        await interaction.editReply({
+          content: '✅ Erledigt! Die Bestätigung wurde im Kanal gepostet.',
+        });
+      } else {
+        // Mehrere Treffer – Auswahlmenü anzeigen
+        const options = scored.map(t => ({
+          label: `[${t.board}] ${t.name}`.slice(0, 100),
+>>>>>>> Stashed changes
           value: t.id
         }))
       );
@@ -364,9 +857,127 @@ client.on('interactionCreate', async (interaction) => {
       `Post erfolgreich ins Forum gesendet (Thread ${threadId})`
     );
 
+<<<<<<< Updated upstream
     await interaction.editReply('OK');
   } catch {
     await interaction.editReply('Fehler beim Posten');
+=======
+      const tags = tagsRaw
+        .split(',')
+        .map(t => t.trim())
+        .filter(Boolean)
+        .map(t => t.slice(0, 29));
+
+      if (tags.length < 1) {
+        await interaction.reply({ content: '❌ Mindestens ein Tag erforderlich.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const categoryIdMap = {
+        "News & Questions": "4",
+        "Le café unité": "9",
+        "Politik & Gesellschaft": "11",
+        "Out of space": "10",
+        "Entartete Kunst": "13",
+        "Texte & Lyrics": "14",
+        "Gegenwelt": "15",
+        "My Story": "19",
+        "Eigene Projekte": "27",
+        "Mensa": "22",
+        "Public": "23",
+        "Müllhalde": "26"
+      };
+
+      const categoryId = categoryIdMap[category];
+      if (!categoryId) {
+        await interaction.reply({ content: '❌ Ungültige Kategorie.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      try {
+        // Neuen Thread im Forum erstellen
+        const finalUrl = await enqueue(async () => {
+          await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
+            waitUntil: 'networkidle2'
+          });
+
+          const titleInput = await page.waitForSelector('#subject', { visible: true });
+          await titleInput.type(title, { delay: 10 });
+
+          const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
+          for (const tag of tags) {
+            await tagInput.click();
+            await page.keyboard.type(tag, { delay: 10 });
+            await page.keyboard.press('Comma');
+            await sleep(120);
+          }
+
+          const editor = await page.waitForSelector('[contenteditable="true"]', { visible: true });
+          await editor.click();
+          await sleep(150);
+
+          const fullMessage = buildForumMessage({
+            author: session.author,
+            message: session.content,
+            sourceName: session.channelName
+          });
+
+          const success = await fastInsert(fullMessage);
+          if (!success) {
+            await page.keyboard.type(fullMessage, { delay: 2 });
+          }
+
+          await sleep(300);
+          const submitButton = await page.waitForSelector('input[value="Absenden"]', { visible: true });
+          await Promise.all([
+            submitButton.click(),
+            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 })
+          ]);
+
+          return page.url();
+        });
+
+        // Öffentliche Bestätigung im ursprünglichen Kanal
+        try {
+          const sourceChannel = await client.channels.fetch(session.channelId);
+          if (sourceChannel) {
+            await sourceChannel.send(
+              `<@${interaction.user.id}> Thread erfolgreich erstellt!\n\n` +
+              `[**Titel:** ${title}, **Kategorie:** ${category}, **Link:** ${finalUrl}]`
+            );
+          }
+        } catch (err) {
+          console.error('Fehler beim Senden der öffentlichen Bestätigung:', err);
+        }
+
+        postboxSessions.delete(interaction.user.id);
+
+        await interaction.editReply({
+          content: '✅ Erledigt! Der neue Thread wurde erstellt und die Bestätigung im Kanal gepostet.',
+        });
+      } catch (error) {
+        console.error('Fehler beim Erstellen des Threads:', error);
+
+        // Fehler öffentlich posten
+        try {
+          const sourceChannel = await client.channels.fetch(session.channelId);
+          if (sourceChannel) {
+            await sourceChannel.send(
+              `<@${interaction.user.id}> ❌ Fehler beim Erstellen des Threads. Bitte später erneut versuchen.`
+            );
+          }
+        } catch (err) {
+          console.error('Fehler beim Senden der Fehlermeldung:', err);
+        }
+
+        await interaction.editReply({
+          content: '❌ Fehler beim Erstellen des Threads. Bitte später erneut versuchen.',
+        });
+      }
+    }
+>>>>>>> Stashed changes
   }
 });
 
