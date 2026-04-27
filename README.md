@@ -16,7 +16,7 @@
   *Note: Slash commands do **not** create a mapping for later editing or deletion (see Limitations).*
 
 - **Reply quoting**
-  When a Discord message references another message, the quoted content is automatically included in the forum post (works for all three methods).
+  When a Discord message references another message, the quoted content is automatically included in the forum post (works for long messages and reaction trigger, slash only manually).
 
 - **Thread cache with smart ranking**
   The bot crawls all configured boards every 5 minutes and stores threads with their category. Autocomplete suggestions are ranked by name similarity, recency of use, and usage frequency.
@@ -42,35 +42,6 @@
 | Long message → button                     | Yes                             | Yes (the long message itself)    | Yes         | Yes (workflow)    | Yes                |
 | 📮 reaction under a message               | Yes                             | Yes (the reacted message)        | Yes         | Yes (workflow)    | Yes                |
 | Slash commands                            | No (only one‑time post)         | No (free text)                   | Only manually | Yes (`/reply`)    | Yes (`/new`)       |
-
-### Advantages and disadvantages
-
-#### Long message → button
-- **Advantages:**
-  - The bot proactively notifies the user; no extra reaction required.
-  - Full mapping (later editing/deletion possible).
-  - Reply quotes are automatically included.
-- **Disadvantages:**
-  - Only works for messages above the minimum length threshold.
-  - The bot’s reply may be considered slightly intrusive.
-
-#### 📮 reaction
-- **Advantages:**
-  - Can be used for any message (even very short ones).
-  - Full mapping.
-  - Low distraction (reaction is discreet).
-- **Disadvantages:**
-  - Requires an explicit user action (adding the reaction).
-  - The workflow only starts after clicking the button that appears.
-
-#### Slash commands
-- **Advantages:**
-  - Direct input of any text – independent of an existing Discord message.
-  - Ideal for administrators or automated scripts.
-- **Disadvantages:**
-  - No mapping → edited or deleted slash command messages are not updated or removed in the forum.
-  - The bot cannot automatically include reply quotes (the user must add them manually).
-  - Slightly more cumbersome to use than a reaction.
 
 ## Installation
 
@@ -146,16 +117,15 @@ MIN_MESSAGE_LENGTH=1500
 
 ## Known Limitations
 
-- **Passwords with special characters** may cause login issues in some forum versions. Use long passwords consisting only of letters and numbers if possible.
+- **Passwords with special characters** may cause login issues in some forum versions. Use long passwords (>64 characters) only of letters and numbers if possible.
 - **No back‑sync after bot downtime**: If the bot is offline, later edits or deletions of Discord messages are not retroactively applied to the forum.
-- **Mapping is only created for messages that come from an interactive workflow** (long‑message button or 📮 reaction). Slash‑command posts have no mapping and therefore cannot be automatically updated or deleted.
+- **Mapping is only created for messages that come from an interactive workflow** (long‑message button or :postbox:-reaction). Slash‑command posts have no mapping and therefore cannot be automatically updated or deleted.
 - **Single browser instance, sequential queue** – this is intentional to avoid server load and flood protection.
 
 ## Planned Features
 
 - **Web interface** for easy configuration of `.env` settings (planned, not yet implemented).
 
-*All other originally planned features (queue, edit/delete sync, confirmation dialog) are already implemented.*
 
 ## License
 

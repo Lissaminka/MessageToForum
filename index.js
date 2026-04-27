@@ -549,7 +549,13 @@ client.once('clientReady', async () => {
   await loginToForum();
   loadCache();
   loadMapping();
-  await incrementalRefresh();
+  // Sofortige erste Aktualisierung (falls Cache veraltet oder leer)
+  await refreshThreadsIfNeeded();
+  // Periodische Aktualisierung alle 5 Minuten
+  setInterval(() => {
+    refreshThreadsIfNeeded();
+  }, 5 * 60 * 1000);
+  console.log(`Thread-Cache wird alle 5 Minuten aktualisiert.`);
 });
 
 client.on('messageCreate', async (message) => {
