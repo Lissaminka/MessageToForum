@@ -364,23 +364,20 @@ async function postToForum(message, author, threadId, discordMessage, meta = nul
 
     await submitButton.click();
 
-    // ========== ÄNDERUNG HIER ==========
-    // Statt manuellem Neuladen der Thread-Startseite warten wir auf die automatische
-    // Weiterleitung des Forums. Diese führt direkt zur Seite mit dem neuen Beitrag.
+    // Warten auf automatische Weiterleitung
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 });
 
-    // Jetzt sind wir auf der korrekten Seite (meist mit ?postID=...)
     let forumPostId = null;
     let postUrl = null;
 
-    // Versuche, die postID aus der aktuellen URL zu extrahieren
+    // postID aus aktueller URL extrahieren
     const currentUrl = page.url();
     const urlMatch = currentUrl.match(/[?&]postID=(\d+)/);
     if (urlMatch) {
       forumPostId = urlMatch[1];
       postUrl = currentUrl;
     } else {
-      // Fallback: letzten Share-Button auf dieser Seite verwenden
+      // Fallback: letzten Share-Button verwenden
       const shareLinkSelector = 'a.wsShareButton[href*="postID="]';
       await page.waitForSelector(shareLinkSelector, { visible: true, timeout: 10000 });
       const linkData = await page.evaluate((selector) => {
@@ -398,7 +395,6 @@ async function postToForum(message, author, threadId, discordMessage, meta = nul
         postUrl = linkData.href;
       }
     }
-    // ========== ENDE DER ÄNDERUNG ==========
 
     console.log(`[ERFOLG] Nachricht von ${author} in Thread ${safeThreadId} gepostet.`);
     console.log(`         Link: ${getThreadUrl(safeThreadId)}`);
@@ -508,7 +504,7 @@ async function incrementalRefresh() {
         }
       }
     } catch {
-      // Fehler beim Crawlen eines Boards ignorieren, mit naechstem fortfahren
+      // Fehler beim Crawlen eines Boards ignorieren, mit nächstem fortfahren
     }
   }
 
@@ -539,7 +535,7 @@ function loadCache() {
 
     console.log(`Cache geladen: ${THREAD_CACHE.length}`);
   } catch {
-    // Cache existiert noch nicht, wird beim naechsten Refresh erstellt
+    // Cache existiert noch nicht, wird beim nächsten Refresh erstellt
   }
 }
 
@@ -568,17 +564,22 @@ client.on('messageCreate', async (message) => {
   const enabled = ENABLE_MIN_LENGTH_FILTER;
   const minLen = message.content.length >= MIN_MESSAGE_LENGTH;
 
-  const shouldPost = enabled && minLen;
+  // Reagieren, wenn der Filter aktiviert ist und Nachricht lang genug ist
+  if (!enabled || !minLen) return;
 
-  if (!shouldPost) return;
+  // Button zum Übertragen der Nachricht ins Forum
+  const row = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`post_long:${message.id}`)
+        .setLabel('📬 Beitrag posten')
+        .setStyle(ButtonStyle.Primary)
+    );
 
-  const result = await enqueue(() => postToForum(
-    message.content,
-    message.author.username,
-    DEFAULT_THREAD_ID,
-    message
-  ));
-  addMapping(message.id, result.forumPostId, DEFAULT_THREAD_ID, result.postUrl);
+  await message.reply({
+    content: `Lange Nachricht erkannt! Möchtest du diesen Beitrag ins Forum übertragen?`,
+    components: [row],
+  });
 });
 
 // ========== Postbox‑Workflow über :postbox:‑Reaktion starten ==========
@@ -793,6 +794,43 @@ client.on('interactionCreate', async (interaction) => {
 
   // ========== Button für Postbox‑Start ==========
   if (interaction.isButton()) {
+    // Button von langen Nachrichten
+    if (interaction.customId.startsWith('post_long:')) {
+      const messageId = interaction.customId.split(':')[1];
+      const originalMessage = await interaction.channel.messages.fetch(messageId).catch(() => null);
+      if (!originalMessage) {
+        await interaction.reply({ content: '❌ Die ursprüngliche Nachricht wurde nicht gefunden.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Session anlegen (gleiches Format wie bei 📮)
+      postboxSessions.set(interaction.user.id, {
+        messageId: originalMessage.id,
+        content: originalMessage.content,
+        author: originalMessage.author.username,
+        channelId: originalMessage.channel.id,
+        channelName: originalMessage.channel.name
+      });
+
+      const row = new ActionRowBuilder()
+        .addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`postbox_action:${originalMessage.id}`)
+            .setPlaceholder('Was möchtest du tun?')
+            .addOptions([
+              { label: 'Neuen Thread erstellen', value: 'new' },
+              { label: 'Thread antworten', value: 'reply' }
+            ])
+        );
+
+      await interaction.reply({
+        content: '📬 Wähle eine Aktion:',
+        components: [row],
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+
     if (interaction.customId.startsWith('postbox_start:')) {
       const messageId = interaction.customId.split(':')[1];
       const session = postboxSessions.get(interaction.user.id);
@@ -818,6 +856,7 @@ client.on('interactionCreate', async (interaction) => {
         components: [row],
         flags: MessageFlags.Ephemeral
       });
+      return;
     }
   }
 
