@@ -10,9 +10,9 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions   // ← neu für Reaktionen
+    GatewayIntentBits.GuildMessageReactions
   ],
-  partials: ['MESSAGE', 'CHANNEL', 'REACTION'] // ← REACTION ergänzt
+  partials: ['MESSAGE', 'CHANNEL', 'REACTION']
 });
 
 const FORUM_USERNAME = process.env.FORUM_USERNAME;
@@ -51,6 +51,48 @@ let LAST_UPDATE = 0;
 
 // Speichert für jeden Nutzer die Daten der Nachricht, auf die reagiert wurde
 const postboxSessions = new Map(); // userId -> { messageId, content, author, channelId }
+
+// Einfache serielle Warteschlange für Puppeteer-Aktionen
+let taskQueue = Promise.resolve();
+const FLOOD_COOLDOWN_MS = 11000; // 11 Sekunden (10 s Forum-Cooldown + 1 s Puffer)
+
+function enqueue(fn) {
+  const task = taskQueue.then(async () => {
+    const result = await fn();
+    await sleep(FLOOD_COOLDOWN_MS);
+    return result;
+  });
+  taskQueue = task.catch(() => {});
+  return task;
+}
+
+// Mapping Discord-Message-ID → { forumPostId, threadId }
+const postMapping = new Map();
+const MAPPING_FILE = './cache/post-mapping.json';
+
+function loadMapping() {
+  try {
+    const data = JSON.parse(fs.readFileSync(MAPPING_FILE, 'utf-8'));
+    for (const [key, value] of Object.entries(data)) {
+      postMapping.set(key, value);
+    }
+    console.log(`Mapping geladen: ${postMapping.size} Einträge`);
+  } catch {
+    console.log('Mapping geladen: 0 Einträge');
+    saveMapping(); // leere Datei anlegen
+  }
+}
+
+function saveMapping() {
+  const obj = Object.fromEntries(postMapping);
+  fs.writeFileSync(MAPPING_FILE, JSON.stringify(obj, null, 2));
+}
+
+function addMapping(discordMessageId, forumPostId, threadId, postUrl) {
+  if (!discordMessageId || !forumPostId) return;
+  postMapping.set(discordMessageId, { forumPostId, threadId, postUrl });
+  saveMapping();
+}
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -95,6 +137,14 @@ ${replyText}${message}
 
 function getThreadUrl(threadId) {
   return `https://forum.theunity.de/index.php?thread/${threadId}/`;
+}
+
+function extractForumPostId(url) {
+  const fragmentMatch = url.match(/#post(\d+)/);
+  if (fragmentMatch) return fragmentMatch[1];
+  const paramMatch = url.match(/[?&]postID=(\d+)/);
+  if (paramMatch) return paramMatch[1];
+  return null;
 }
 
 function trackThreadUsage(threadId) {
@@ -314,23 +364,53 @@ async function postToForum(message, author, threadId, discordMessage, meta = nul
 
     await submitButton.click();
 
+    // ========== ÄNDERUNG HIER ==========
+    // Statt manuellem Neuladen der Thread-Startseite warten wir auf die automatische
+    // Weiterleitung des Forums. Diese führt direkt zur Seite mit dem neuen Beitrag.
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 });
+
+    // Jetzt sind wir auf der korrekten Seite (meist mit ?postID=...)
+    let forumPostId = null;
+    let postUrl = null;
+
+    // Versuche, die postID aus der aktuellen URL zu extrahieren
+    const currentUrl = page.url();
+    const urlMatch = currentUrl.match(/[?&]postID=(\d+)/);
+    if (urlMatch) {
+      forumPostId = urlMatch[1];
+      postUrl = currentUrl;
+    } else {
+      // Fallback: letzten Share-Button auf dieser Seite verwenden
+      const shareLinkSelector = 'a.wsShareButton[href*="postID="]';
+      await page.waitForSelector(shareLinkSelector, { visible: true, timeout: 10000 });
+      const linkData = await page.evaluate((selector) => {
+        const links = document.querySelectorAll(selector);
+        if (links.length === 0) return null;
+        const lastLink = links[links.length - 1];
+        const url = new URL(lastLink.href);
+        return {
+          postId: url.searchParams.get('postID') || null,
+          href: lastLink.href
+        };
+      }, shareLinkSelector);
+      if (linkData) {
+        forumPostId = linkData.postId;
+        postUrl = linkData.href;
+      }
+    }
+    // ========== ENDE DER ÄNDERUNG ==========
+
     console.log(`[ERFOLG] Nachricht von ${author} in Thread ${safeThreadId} gepostet.`);
     console.log(`         Link: ${getThreadUrl(safeThreadId)}`);
     console.log(`         Zeit : ${new Date().toLocaleString('de-DE')}`);
 
-    return {
-      threadUrl: getThreadUrl(safeThreadId),
-      threadId: safeThreadId
-    };
+    return { threadUrl: getThreadUrl(safeThreadId), threadId: safeThreadId, forumPostId, postUrl };
 
   } catch (err) {
     console.error("Post Fehler:", err);
     console.error(`[FEHLER] Nachricht von ${author} konnte nicht in Thread ${threadId} gepostet werden.`);
 
-    return {
-      threadUrl: getThreadUrl(safeThreadId),
-      threadId: safeThreadId
-    };
+    return { threadUrl: getThreadUrl(safeThreadId), threadId: safeThreadId, forumPostId: null, postUrl: null };
   }
 }
 
@@ -472,6 +552,7 @@ client.once('clientReady', async () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
   await loginToForum();
   loadCache();
+  loadMapping();
   await incrementalRefresh();
 });
 
@@ -491,15 +572,16 @@ client.on('messageCreate', async (message) => {
 
   if (!shouldPost) return;
 
-  await postToForum(
+  const result = await enqueue(() => postToForum(
     message.content,
     message.author.username,
-    DEFAULT_THREAD_ID,          // ← korrigiert (vorher: message.channel.name)
+    DEFAULT_THREAD_ID,
     message
-  );
+  ));
+  addMapping(message.id, result.forumPostId, DEFAULT_THREAD_ID, result.postUrl);
 });
 
-// ========== Postbox‑Workflow über 📮‑Reaktion starten ==========
+// ========== Postbox‑Workflow über :postbox:‑Reaktion starten ==========
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
   if (reaction.emoji.name !== '📮') return;
@@ -583,13 +665,13 @@ client.on('interactionCreate', async (interaction) => {
       const thread = interaction.options.getString('thread');
       const meta = THREAD_CACHE.find(t => t.id === thread);
 
-      const result = await postToForum(
+      const result = await enqueue(() => postToForum(
         message,
         author,
         thread,
         interaction,
         meta
-      );
+      ));
 
       await interaction.editReply(
         `<@${interaction.user.id}> Nachricht erfolgreich ins Forum übertragen!\n\n` +
@@ -646,53 +728,55 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
-        waitUntil: 'networkidle2'
-      });
+      const finalUrl = await enqueue(async () => {
+        await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
+          waitUntil: 'networkidle2'
+        });
 
-      const titleInput = await page.waitForSelector('#subject', { visible: true });
-      await titleInput.type(title, { delay: 10 });
+        const titleInput = await page.waitForSelector('#subject', { visible: true });
+        await titleInput.type(title, { delay: 10 });
 
-      const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
+        const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
 
-      for (const tag of tags) {
-        await tagInput.click();
-        await page.keyboard.type(tag, { delay: 10 });
-        await page.keyboard.press('Comma');
-        await sleep(120);
-      }
+        for (const tag of tags) {
+          await tagInput.click();
+          await page.keyboard.type(tag, { delay: 10 });
+          await page.keyboard.press('Comma');
+          await sleep(120);
+        }
 
-      const editor = await page.waitForSelector('[contenteditable="true"]', {
-        visible: true
-      });
+        const editor = await page.waitForSelector('[contenteditable="true"]', {
+          visible: true
+        });
 
-      await editor.click();
-      await sleep(150);
+        await editor.click();
+        await sleep(150);
 
-      const fullMessage = buildForumMessage({
-        author,
-        message,
-        sourceName: interaction.channel?.name
-      });
+        const fullMessage = buildForumMessage({
+          author,
+          message,
+          sourceName: interaction.channel?.name
+        });
 
-      const success = await fastInsert(fullMessage);
+        const success = await fastInsert(fullMessage);
 
-      if (!success) {
-        await page.keyboard.type(fullMessage, { delay: 2 });
-      }
+        if (!success) {
+          await page.keyboard.type(fullMessage, { delay: 2 });
+        }
 
-      await sleep(300);
+        await sleep(300);
 
-      const submitButton = await page.waitForSelector('input[value="Absenden"]', {
-        visible: true
-      });
+        const submitButton = await page.waitForSelector('input[value="Absenden"]', {
+          visible: true
+        });
 
         await Promise.all([
           submitButton.click(),
           page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 })
         ]);
 
-        const finalUrl = page.url();
+        return page.url();
+      });
 
       console.log(`[ERFOLG] Neuer Thread von ${author} erstellt.`);
       console.log(`         Titel    : ${title}`);
@@ -704,7 +788,7 @@ client.on('interactionCreate', async (interaction) => {
       );
     }
 
-    return; // Wichtig: Nach Slash‑Commands nicht weiter verarbeiten
+    return;
   }
 
   // ========== Button für Postbox‑Start ==========
@@ -737,7 +821,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ========== NEU: Select‑Menü für Postbox‑Workflow ==========
+  // ========== Select‑Menü für Postbox‑Workflow ==========
   if (interaction.isStringSelectMenu()) {
     const customId = interaction.customId;
 
@@ -858,14 +942,14 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
       const meta = THREAD_CACHE.find(t => t.id === threadId);
-      const result = await postToForum(
+      const result = await enqueue(() => postToForum(
         session.content,
         session.author,
         threadId,
         { channel: { name: session.channelName } },
         meta
-      );
-
+      ));
+      addMapping(session.messageId, result.forumPostId, threadId, result.postUrl);
       trackThreadUsage(threadId);
 
       // Öffentliche Bestätigung im ursprünglichen Kanal
@@ -889,7 +973,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ========== NEU: Modal‑Submit für Postbox‑Workflow ==========
+  // ========== Modal‑Submit für Postbox‑Workflow ==========
   if (interaction.isModalSubmit()) {
     const customId = interaction.customId;
 
@@ -929,14 +1013,14 @@ client.on('interactionCreate', async (interaction) => {
         const thread = scored[0];
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const result = await postToForum(
+        const result = await enqueue(() => postToForum(
           session.content,
           session.author,
           thread.id,
           { channel: { name: session.channelName } },
           thread
-        );
-
+        ));
+        addMapping(session.messageId, result.forumPostId, thread.id, result.postUrl);
         trackThreadUsage(thread.id);
 
         // Öffentliche Bestätigung im ursprünglichen Kanal
@@ -1036,44 +1120,64 @@ client.on('interactionCreate', async (interaction) => {
 
       try {
         // Neuen Thread im Forum erstellen
-        await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
-          waitUntil: 'networkidle2'
+        let newThreadId = null;
+        const finalUrl = await enqueue(async () => {
+          await page.goto(`https://forum.theunity.de/thread-add/${categoryId}/`, {
+            waitUntil: 'networkidle2'
+          });
+
+          const titleInput = await page.waitForSelector('#subject', { visible: true });
+          await titleInput.type(title, { delay: 10 });
+
+          const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
+          for (const tag of tags) {
+            await tagInput.click();
+            await page.keyboard.type(tag, { delay: 10 });
+            await page.keyboard.press('Comma');
+            await sleep(120);
+          }
+
+          const editor = await page.waitForSelector('[contenteditable="true"]', { visible: true });
+          await editor.click();
+          await sleep(150);
+
+          const fullMessage = buildForumMessage({
+            author: session.author,
+            message: session.content,
+            sourceName: session.channelName
+          });
+
+          const success = await fastInsert(fullMessage);
+          if (!success) {
+            await page.keyboard.type(fullMessage, { delay: 2 });
+          }
+
+          await sleep(300);
+          const submitButton = await page.waitForSelector('input[value="Absenden"]', { visible: true });
+          await Promise.all([
+            submitButton.click(),
+            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 })
+          ]);
+
+          return page.url();
         });
 
-        const titleInput = await page.waitForSelector('#subject', { visible: true });
-        await titleInput.type(title, { delay: 10 });
+        // Thread‑ID aus der URL extrahieren
+        newThreadId = finalUrl.match(/thread\/(\d+)/)?.[1] || null;
 
-        const tagInput = await page.waitForSelector('#tagSearchInput', { visible: true });
-        for (const tag of tags) {
-          await tagInput.click();
-          await page.keyboard.type(tag, { delay: 10 });
-          await page.keyboard.press('Comma');
-          await sleep(120);
-        }
-
-        const editor = await page.waitForSelector('[contenteditable="true"]', { visible: true });
-        await editor.click();
-        await sleep(150);
-
-        const fullMessage = buildForumMessage({
-          author: session.author,
-          message: session.content,
-          sourceName: session.channelName
+        // Post‑ID und vollständige Share‑URL des ersten Beitrags auslesen
+        const linkData = await page.evaluate(() => {
+          const link = document.querySelector('a.wsShareButton[href*="postID="]');
+          if (!link) return null;
+          const url = new URL(link.href);
+          return {
+            postId: url.searchParams.get('postID') || null,
+            href: link.href
+          };
         });
-
-        const success = await fastInsert(fullMessage);
-        if (!success) {
-          await page.keyboard.type(fullMessage, { delay: 2 });
-        }
-
-        await sleep(300);
-        const submitButton = await page.waitForSelector('input[value="Absenden"]', { visible: true });
-        await Promise.all([
-          submitButton.click(),
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 })
-        ]);
-
-        const finalUrl = page.url();
+        const forumPostId = linkData?.postId || null;
+        const postUrl = linkData?.href || null;
+        addMapping(session.messageId, forumPostId, newThreadId, postUrl);
 
         // Öffentliche Bestätigung im ursprünglichen Kanal
         try {
@@ -1094,6 +1198,7 @@ client.on('interactionCreate', async (interaction) => {
           content: '✅ Erledigt! Der neue Thread wurde erstellt und die Bestätigung im Kanal gepostet.',
         });
       } catch (error) {
+        // dieser catch bleibt unverändert!
         console.error('Fehler beim Erstellen des Threads:', error);
 
         // Fehler öffentlich posten
@@ -1116,5 +1221,108 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// ========== Lösch‑ und Edit‑Synchronisation ==========
+client.on('messageDelete', async (message) => {
+  if (message.partial) return;
+  const mapped = postMapping.get(message.id);
+  if (!mapped) return;
+
+  try {
+    await enqueue(async () => {
+      const { forumPostId, postUrl } = mapped;
+      console.log(`[DELETE] Versuche Beitrag ${forumPostId} zu löschen: ${postUrl}`);
+
+      await page.goto(postUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+      await page.waitForSelector(`#post${forumPostId}`, { visible: true, timeout: 10000 });
+
+      const actualPostId = await page.evaluate((expectedId) => {
+        const container = document.querySelector(`#post${expectedId}`);
+        if (!container) return null;
+        return container.id.replace('post', '');
+      }, forumPostId);
+
+      if (actualPostId !== forumPostId) {
+        console.error(`[SICHERHEIT] Abbruch: ID ${actualPostId} != ${forumPostId}`);
+        const channel = await client.channels.fetch(message.channel.id).catch(() => null);
+        if (channel) {
+          await channel.send(`⚠️ **Sicherheitsabbruch**: Beitrag ${forumPostId} nicht eindeutig. Bitte manuell prüfen.`);
+        }
+        return;
+      }
+
+      console.log(`[SICHERHEIT] ID-Check bestanden: ${actualPostId}`);
+
+      const postContainer = await page.$(`#post${forumPostId}`);
+      const editButton = await postContainer.$('.jsMessageEditButton');
+      if (!editButton) throw new Error('Edit-Button nicht gefunden');
+      await editButton.click();
+
+      const deleteItem = await page.waitForSelector('[data-item="trash"]', { visible: true });
+      await deleteItem.click();
+      const confirmButton = await page.waitForSelector('button[data-type="submit"]', { visible: true });
+      await confirmButton.click();
+
+      postMapping.delete(message.id);
+      saveMapping();
+      console.log(`[DELETE] Forumbeitrag ${forumPostId} gelöscht.`);
+    });
+  } catch (err) {
+    console.error(`Fehler beim Löschen von Beitrag ${mapped.forumPostId}:`, err);
+  }
+});
+
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+  if (newMessage.partial) await newMessage.fetch();
+  if (!newMessage.content || oldMessage.content === newMessage.content) return;
+
+  const mapped = postMapping.get(newMessage.id);
+  if (!mapped) return;
+
+  try {
+    await enqueue(async () => {
+      const { forumPostId, postUrl } = mapped;
+
+      await page.goto(postUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+      await page.waitForSelector(`#post${forumPostId}`, { visible: true, timeout: 10000 });
+
+      const postContainer = await page.$(`#post${forumPostId}`);
+      if (!postContainer) throw new Error('Beitrags-Container nicht gefunden');
+
+      const editButton = await postContainer.$('.jsMessageEditButton');
+      if (!editButton) throw new Error('Edit-Button nicht gefunden');
+      await editButton.click();
+
+      const editItem = await page.waitForSelector('[data-item="editItem"]', { visible: true });
+      await editItem.click();
+
+      const editor = await page.waitForSelector('[contenteditable="true"]', { visible: true });
+      await editor.click();
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyA');
+      await page.keyboard.up('Control');
+      await page.keyboard.press('Backspace');
+
+      const newForumMessage = buildForumMessage({
+        author: newMessage.author.username,
+        message: newMessage.content,
+        sourceName: newMessage.channel.name,
+        replyText: ''
+      });
+
+      const success = await fastInsert(newForumMessage);
+      if (!success) {
+        await page.keyboard.type(newForumMessage, { delay: 2 });
+      }
+
+      await sleep(300);
+      const saveButton = await page.waitForSelector('button.buttonPrimary[data-type="save"]', { visible: true });
+      await saveButton.click();
+
+      console.log(`[EDIT] Forumbeitrag ${forumPostId} erfolgreich aktualisiert.`);
+    });
+  } catch (err) {
+    console.error(`Fehler beim Bearbeiten von Beitrag ${mapped.forumPostId}:`, err);
+  }
+});
 
 client.login(DISCORD_TOKEN);
