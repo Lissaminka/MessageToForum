@@ -1,4 +1,3 @@
-```markdown
 # MessageToForum
 
 **MessageToForum** is a Node.js bot that bridges Discord and a WoltLab-based forum. It offers three methods for transferring messages to the forum and synchronizes edits and deletions when the original Discord message is still available.
@@ -167,4 +166,3 @@ MIT – free to use, modify, and distribute.
 *Last updated: April 2026 – reflects the stable bot with interactive workflow and full edit/delete synchronisation.*
 
 ---
-```
